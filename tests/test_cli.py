@@ -9,6 +9,7 @@ from modrinth_collection_downloader.cli import (
     _get_channels,
     build_parser,
     loader_filter_for_project_type,
+    parse_channel_selection,
     parse_csv,
     parse_type_selection,
     type_folder,
@@ -74,6 +75,11 @@ def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
     console.file.close()
 
     assert channels == ["release", "beta"]
+
+
+def test_channel_selection_accepts_all():
+    assert parse_channel_selection("all") == ["release", "beta", "alpha"]
+    assert parse_channel_selection("release,all") == ["release", "beta", "alpha"]
 
 
 def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):

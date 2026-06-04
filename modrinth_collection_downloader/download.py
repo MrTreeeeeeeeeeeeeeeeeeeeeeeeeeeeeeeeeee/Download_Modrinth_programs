@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from .modrinth import DEFAULT_USER_AGENT
 
 SKIPPED_FILE_TYPES = {"sources-jar", "dev-jar", "javadoc-jar", "signature"}
 MINECRAFT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+|x|\*))?$", re.IGNORECASE)
+ARCHIVE_EXTENSIONS = {".jar", ".mrpack", ".zip"}
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -42,7 +44,9 @@ WINDOWS_RESERVED_NAMES = {
 
 
 class DownloadError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, bytes_written: int = 0) -> None:
+        self.bytes_written = bytes_written
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,12 @@ class FileDownloadResult:
     status: str
     path: Path
     message: str = ""
+
+
+@dataclass(frozen=True)
+class DownloadOutcome:
+    warning: str = ""
+    attempts: int = 1
 
 
 def select_version(
@@ -169,6 +179,59 @@ def select_version_file(version: dict[str, Any]) -> dict[str, Any] | None:
     return files[0]
 
 
+def _metadata_mismatches(
+    *,
+    target: Path,
+    hashes: dict[str, str],
+    hashers: dict[str, Any],
+    expected_size: int | None,
+    bytes_written: int,
+) -> list[str]:
+    mismatches: list[str] = []
+    if expected_size is not None and bytes_written != expected_size:
+        mismatches.append(
+            f"Downloaded size mismatch for {target.name}: expected {expected_size} bytes, got {bytes_written} bytes."
+        )
+
+    for algorithm, hasher in hashers.items():
+        expected = hashes.get(algorithm)
+        actual = hasher.hexdigest()
+        if expected and actual.lower() != expected.lower():
+            mismatches.append(f"{algorithm} hash mismatch for {target.name}.")
+
+    return mismatches
+
+
+def _response_content_length(response: requests.Response) -> int | None:
+    value = response.headers.get("Content-Length")
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _can_accept_metadata_mismatch(
+    path: Path,
+    *,
+    target: Path,
+    response_size: int | None,
+    bytes_written: int,
+) -> bool:
+    if response_size is not None and response_size != bytes_written:
+        return False
+    if target.suffix.lower() not in ARCHIVE_EXTENSIONS:
+        return False
+    return _is_valid_archive(path)
+
+
+def _is_valid_archive(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return bool(archive.infolist()) and archive.testzip() is None
+    except zipfile.BadZipFile:
+        return False
+
+
 def sanitize_filename(filename: str) -> str:
     name = Path(filename.replace("\\", "/")).name
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
@@ -254,8 +317,53 @@ def download_file(
     timeout: int = 60,
     chunk_size: int = 1024 * 1024,
     progress_callback: Callable[[int], None] | None = None,
+    progress_reset_callback: Callable[[], None] | None = None,
     user_agent: str = DEFAULT_USER_AGENT,
-) -> None:
+    strict_metadata: bool = False,
+    retries: int = 2,
+) -> DownloadOutcome:
+    last_error: DownloadError | None = None
+    for attempt in range(retries + 1):
+        try:
+            outcome = _download_file_once(
+                url,
+                destination,
+                hashes=hashes,
+                size=size,
+                session=session,
+                timeout=timeout,
+                chunk_size=chunk_size,
+                progress_callback=progress_callback,
+                user_agent=user_agent,
+                allow_metadata_mismatch=not strict_metadata and attempt == retries,
+            )
+        except DownloadError as exc:
+            last_error = exc
+            if progress_reset_callback and exc.bytes_written:
+                progress_reset_callback()
+            if attempt >= retries:
+                raise
+            continue
+        return DownloadOutcome(warning=outcome.warning, attempts=attempt + 1)
+
+    if last_error:
+        raise last_error
+    raise DownloadError("Download failed.")
+
+
+def _download_file_once(
+    url: str,
+    destination: str | Path,
+    *,
+    hashes: dict[str, str] | None,
+    size: int | None,
+    session: requests.Session | None,
+    timeout: int,
+    chunk_size: int,
+    progress_callback: Callable[[int], None] | None,
+    user_agent: str,
+    allow_metadata_mismatch: bool,
+) -> DownloadOutcome:
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     part_path = target.with_name(f"{target.name}.part")
@@ -290,17 +398,32 @@ def download_file(
                 if progress_callback:
                     progress_callback(len(chunk))
 
-        if size is not None and bytes_written != size:
-            raise DownloadError(
-                f"Downloaded size mismatch: expected {size} bytes, got {bytes_written} bytes."
-            )
-
-        for algorithm, hasher in hashers.items():
-            expected = (hashes or {}).get(algorithm)
-            if expected and hasher.hexdigest().lower() != expected.lower():
-                raise DownloadError(f"{algorithm} hash mismatch for {target.name}.")
+        metadata_mismatches = _metadata_mismatches(
+            target=target,
+            hashes=hashes or {},
+            hashers=hashers,
+            expected_size=size,
+            bytes_written=bytes_written,
+        )
+        if metadata_mismatches:
+            response_size = _response_content_length(response)
+            if allow_metadata_mismatch and _can_accept_metadata_mismatch(
+                part_path,
+                target=target,
+                response_size=response_size,
+                bytes_written=bytes_written,
+            ):
+                os.replace(part_path, target)
+                return DownloadOutcome(
+                    warning=(
+                        "Modrinth metadata did not match the CDN file, but the CDN transfer completed "
+                        f"and the downloaded archive passed validation. {' '.join(metadata_mismatches)}"
+                    )
+                )
+            raise DownloadError(" ".join(metadata_mismatches), bytes_written=bytes_written)
 
         os.replace(part_path, target)
+        return DownloadOutcome()
     except Exception:
         if part_path.exists():
             part_path.unlink()
@@ -323,11 +446,11 @@ def perform_downloads(
             continue
 
         try:
-            downloader(plan.url, plan.path, hashes=plan.hashes, size=plan.size)
+            outcome = downloader(plan.url, plan.path, hashes=plan.hashes, size=plan.size)
         except Exception as exc:
             results.append(FileDownloadResult("failed", plan.path, str(exc)))
         else:
-            results.append(FileDownloadResult("downloaded", plan.path))
+            results.append(FileDownloadResult("downloaded", plan.path, getattr(outcome, "warning", "")))
     return results
 
 

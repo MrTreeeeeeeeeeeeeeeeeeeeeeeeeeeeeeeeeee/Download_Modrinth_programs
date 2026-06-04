@@ -1,7 +1,11 @@
 import hashlib
+import io
+import zipfile
 
 from modrinth_collection_downloader.download import (
+    DownloadError,
     FileDownloadPlan,
+    download_file,
     file_matches,
     perform_downloads,
     resolve_destination,
@@ -9,6 +13,37 @@ from modrinth_collection_downloader.download import (
     select_version,
     select_version_file,
 )
+
+
+class FakeDownloadResponse:
+    def __init__(self, content: bytes, status_code=200):
+        self.content = content
+        self.status_code = status_code
+        self.headers = {"Content-Length": str(len(content))}
+
+    def iter_content(self, chunk_size=1024):
+        for index in range(0, len(self.content), chunk_size):
+            yield self.content[index : index + chunk_size]
+
+    def close(self):
+        pass
+
+
+class FakeDownloadSession:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def make_zip_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("pack.mcmeta", "{}")
+    return buffer.getvalue()
 
 
 def test_select_version_uses_newest_matching_release():
@@ -171,6 +206,49 @@ def test_existing_matching_file_is_skipped(tmp_path):
     assert plan.status == "already_exists"
     assert plan.path == target
     assert file_matches(target, hashes={"sha1": digest}, size=len(content))
+
+
+def test_download_accepts_valid_archive_when_modrinth_metadata_is_stale(tmp_path):
+    content = make_zip_bytes()
+    session = FakeDownloadSession(FakeDownloadResponse(content), FakeDownloadResponse(content))
+    resets = []
+    target = tmp_path / "resourcepack.zip"
+
+    outcome = download_file(
+        "https://example.test/resourcepack.zip",
+        target,
+        hashes={"sha1": "bad"},
+        size=len(content) + 10,
+        session=session,
+        progress_reset_callback=lambda: resets.append(True),
+        retries=1,
+    )
+
+    assert target.read_bytes() == content
+    assert session.calls == 2
+    assert resets == [True]
+    assert outcome.attempts == 2
+    assert "metadata did not match" in outcome.warning
+
+
+def test_download_strict_metadata_rejects_metadata_mismatch(tmp_path):
+    content = make_zip_bytes()
+    session = FakeDownloadSession(FakeDownloadResponse(content))
+
+    try:
+        download_file(
+            "https://example.test/resourcepack.zip",
+            tmp_path / "resourcepack.zip",
+            hashes={"sha1": "bad"},
+            size=len(content) + 10,
+            session=session,
+            strict_metadata=True,
+            retries=0,
+        )
+    except DownloadError as exc:
+        assert "Downloaded size mismatch" in str(exc)
+    else:
+        raise AssertionError("Expected metadata mismatch to fail in strict mode.")
 
 
 def test_conflicting_filename_gets_project_and_version_suffix(tmp_path):

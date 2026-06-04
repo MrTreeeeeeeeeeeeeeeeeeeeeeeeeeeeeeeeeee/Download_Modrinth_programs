@@ -37,6 +37,7 @@ MOD_LOADER_TYPES = {"mod", "modpack"}
 SHADER_LOADER_TYPES = {"shader"}
 PLUGIN_LOADER_TYPES = {"plugin"}
 NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
+ALL_CHANNELS = ["release", "beta", "alpha"]
 DEFAULT_CHANNELS = ["release", "beta"]
 
 
@@ -79,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--channels",
-        help="Comma-separated release channels. Default: release,beta.",
+        help="Comma-separated release channels, or all. Default: release,beta.",
     )
     parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
     parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
@@ -98,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download all files directly into the output folder instead of type subfolders.",
     )
     parser.add_argument("--log-file", help="Log file path, or a folder for the default log filename.")
+    parser.add_argument(
+        "--strict-metadata",
+        action="store_true",
+        help="Fail when downloaded file size or hashes differ from Modrinth metadata.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Show planned downloads only.")
     parser.add_argument("--yes", action="store_true", help="Use defaults and do not prompt.")
     return parser
@@ -122,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         plugin_loaders=args.plugin_loaders or "(any)",
         channels=args.channels or f"(prompt/default {','.join(DEFAULT_CHANNELS)})",
         dry_run=args.dry_run,
+        strict_metadata=args.strict_metadata,
         type_subfolders=type_subfolders,
         flat=args.flat,
         token_argument_provided=bool(args.token),
@@ -353,7 +360,12 @@ def main(argv: list[str] | None = None) -> int:
         run_log.add("Dry run complete; no files downloaded")
         return finish(0)
 
-    failures = _download_planned(console, planned, run_log=run_log)
+    failures = _download_planned(
+        console,
+        planned,
+        strict_metadata=args.strict_metadata,
+        run_log=run_log,
+    )
     _print_summary(console, planned, already_existing, skipped, failures)
     run_log.add(
         "Summary",
@@ -535,11 +547,20 @@ def _optional_list(value: str | None, *, prompt: str, console: Console, yes: boo
 
 def _get_channels(value: str | None, console: Console, *, yes: bool) -> list[str]:
     if value is not None:
-        return parse_csv(value) or list(DEFAULT_CHANNELS)
+        return parse_channel_selection(value)
     if yes:
         return list(DEFAULT_CHANNELS)
-    raw_channels = Prompt.ask("Version channels, comma-separated", default=",".join(DEFAULT_CHANNELS))
-    return parse_csv(raw_channels) or list(DEFAULT_CHANNELS)
+    raw_channels = Prompt.ask("Version channels, comma-separated, or all", default=",".join(DEFAULT_CHANNELS))
+    return parse_channel_selection(raw_channels)
+
+
+def parse_channel_selection(value: str | None) -> list[str]:
+    channels = parse_csv(value)
+    if not channels:
+        return list(DEFAULT_CHANNELS)
+    if any(channel.lower() == "all" for channel in channels):
+        return list(ALL_CHANNELS)
+    return channels
 
 
 def _get_output_dir(
@@ -730,6 +751,7 @@ def _download_planned(
     console: Console,
     planned: list[PlannedDownload],
     *,
+    strict_metadata: bool = False,
     run_log: RunLog | None = None,
 ) -> list[tuple[PlannedDownload, str]]:
     failures: list[tuple[PlannedDownload, str]] = []
@@ -765,7 +787,7 @@ def _download_planned(
                     total=total,
                 )
             try:
-                download_file(
+                outcome = download_file(
                     item.file["url"],
                     item.destination.path,
                     hashes=item.file.get("hashes") or {},
@@ -774,6 +796,8 @@ def _download_planned(
                         task_id,
                         advance=amount,
                     ),
+                    progress_reset_callback=lambda task_id=task_id: progress.update(task_id, completed=0),
+                    strict_metadata=strict_metadata,
                 )
             except Exception as exc:
                 failures.append((item, str(exc)))
@@ -793,13 +817,23 @@ def _download_planned(
             else:
                 progress.update(task_id, completed=item.file.get("size") or 1)
                 progress.remove_task(task_id)
-                progress.console.print(f"[green]Downloaded {index}/{total}:[/] {project_name} -> {filename}")
+                warning = getattr(outcome, "warning", "")
+                attempts = getattr(outcome, "attempts", 1)
+                if warning:
+                    progress.console.print(
+                        f"[yellow]Downloaded {index}/{total} with warning:[/] {project_name} -> {filename}"
+                    )
+                    progress.console.print(f"[yellow]{warning}[/]")
+                else:
+                    progress.console.print(f"[green]Downloaded {index}/{total}:[/] {project_name} -> {filename}")
                 if run_log:
                     run_log.add(
                         "Download finished",
                         title=project_name,
                         filename=filename,
                         destination=item.destination.path,
+                        warning=warning or "(none)",
+                        attempts=attempts,
                         index=index,
                         total=total,
                     )
