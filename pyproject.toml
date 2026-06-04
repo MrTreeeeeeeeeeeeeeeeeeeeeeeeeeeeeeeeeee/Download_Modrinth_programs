@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modrinth-collection-downloader"
+version = "0.1.0"
+description = "Download selected project types from a Modrinth collection."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "rich>=13.7",
+]
+
+[project.scripts]
+modrinth-collection-downloader = "modrinth_collection_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["modrinth_collection_downloader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

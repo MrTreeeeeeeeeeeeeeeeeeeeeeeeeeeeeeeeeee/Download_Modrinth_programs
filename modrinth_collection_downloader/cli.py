@@ -1,0 +1,542 @@
+from __future__ import annotations
+
+import argparse
+import getpass
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+from rich.console import Console
+from rich.progress import BarColumn, DownloadColumn, Progress, TaskProgressColumn, TextColumn
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+
+from .auth import mask_token, normalize_token, resolve_token
+from .config import (
+    AppConfig,
+    forget_token,
+    get_config_path,
+    load_config,
+    remember_download_dir,
+    save_config,
+    set_token,
+)
+from .download import (
+    DestinationPlan,
+    download_file,
+    resolve_destination,
+    select_version,
+    select_version_file,
+)
+from .modrinth import ApiError, ModrinthClient, parse_collection_id
+
+
+TYPE_FOLDERS = {
+    "mod": "mods",
+    "modpack": "modpacks",
+    "resourcepack": "resourcepacks",
+    "shader": "shaders",
+    "plugin": "plugins",
+    "datapack": "datapacks",
+    "minecraft_java_server": "minecraft_java_servers",
+}
+
+
+@dataclass
+class PlannedDownload:
+    project: dict[str, Any]
+    version: dict[str, Any]
+    file: dict[str, Any]
+    destination: DestinationPlan
+
+
+@dataclass
+class SkippedProject:
+    project: dict[str, Any]
+    reason: str
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="modrinth-collection-downloader",
+        description="Download selected project types from a Modrinth collection.",
+    )
+    parser.add_argument("collection", nargs="?", help="Modrinth collection URL or collection ID.")
+    parser.add_argument("-o", "--output", help="Folder to download into.")
+    parser.add_argument("--types", help="Comma-separated project types to download.")
+    parser.add_argument("--minecraft-version", help="Optional Minecraft version filter.")
+    parser.add_argument("--loaders", help="Comma-separated loader filter.")
+    parser.add_argument("--channels", default="release", help="Comma-separated release channels.")
+    parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
+    parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
+    parser.add_argument("--set-token", action="store_true", help="Prompt for, validate, and save a token.")
+    parser.add_argument("--forget-token", action="store_true", help="Remove the saved token.")
+    parser.add_argument("--no-token", action="store_true", help="Ignore saved and environment tokens.")
+    parser.add_argument("--group-by-type", action="store_true", help="Download into type subfolders.")
+    parser.add_argument("--dry-run", action="store_true", help="Show planned downloads only.")
+    parser.add_argument("--yes", action="store_true", help="Use defaults and do not prompt.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    console = Console()
+
+    try:
+        config = load_config()
+    except Exception as exc:
+        console.print(f"[red]Could not load config:[/] {exc}")
+        return 1
+
+    config_changed = False
+
+    if args.forget_token:
+        forget_token(config)
+        config_changed = True
+        console.print("[yellow]Saved Modrinth token removed.[/]")
+        if not args.collection and not args.set_token and not args.save_token:
+            save_config(config)
+            return 0
+
+    if args.set_token:
+        token = _get_token_for_saving(args, console)
+        if not token:
+            return 2
+        if not _validate_and_report_token(token, console):
+            return 1
+        if not _save_token_with_warning(config, token, console, yes=args.yes):
+            return 1
+        config_changed = True
+        if not args.collection:
+            save_config(config)
+            return 0
+
+    if args.save_token and not args.set_token:
+        token = _get_token_for_saving(args, console)
+        if not token:
+            return 2
+        if not _save_token_with_warning(config, token, console, yes=args.yes):
+            return 1
+        config_changed = True
+        if not args.collection:
+            save_config(config)
+            return 0
+
+    resolved_token = resolve_token(
+        cli_token=args.token,
+        saved_token=config.modrinth_token,
+        no_token=args.no_token,
+    )
+
+    if config_changed:
+        save_config(config)
+
+    collection_input = args.collection
+    if not collection_input:
+        if args.yes:
+            console.print("[red]A collection URL or ID is required when --yes is used.[/]")
+            return 2
+        collection_input = Prompt.ask("[cyan]Modrinth collection URL or ID[/]")
+
+    try:
+        collection_id = parse_collection_id(collection_input)
+    except ValueError as exc:
+        console.print(f"[red]Invalid collection:[/] {exc}")
+        return 2
+
+    client = ModrinthClient(token=resolved_token.token)
+    if resolved_token.token:
+        console.print(f"[dim]Using Modrinth token from {resolved_token.source}: {mask_token(resolved_token.token)}[/]")
+
+    try:
+        collection = client.get_collection(collection_id)
+    except ApiError as exc:
+        _print_api_error(console, exc)
+        return 1
+
+    project_ids = list(collection.get("projects") or [])
+    console.print(f"[cyan]Collection:[/] {collection.get('name', collection_id)}")
+    console.print(f"[cyan]Projects:[/] {len(project_ids)}")
+
+    if not project_ids:
+        console.print("[yellow]This collection has no projects.[/]")
+        return 0
+
+    try:
+        projects = client.get_projects(project_ids)
+    except ApiError as exc:
+        _print_api_error(console, exc)
+        return 1
+
+    ordered_projects = _order_projects(project_ids, projects)
+    type_counts = Counter(project.get("project_type", "unknown") for project in ordered_projects)
+    selected_types = _select_types(args.types, type_counts, console, yes=args.yes)
+    if not selected_types:
+        console.print("[yellow]No item types selected.[/]")
+        return 0
+
+    selected_projects = [
+        project for project in ordered_projects if project.get("project_type", "unknown") in selected_types
+    ]
+
+    minecraft_versions = _optional_list(
+        args.minecraft_version,
+        prompt="Minecraft version filter, blank for any",
+        console=console,
+        yes=args.yes,
+    )
+    loaders = _optional_list(
+        args.loaders,
+        prompt="Loader filter, comma-separated, blank for any",
+        console=console,
+        yes=args.yes,
+    )
+    channels = parse_csv(args.channels) or ["release"]
+
+    output_dir = _get_output_dir(args.output, config, console, yes=args.yes)
+    if output_dir is None:
+        return 2
+    remember_download_dir(config, output_dir)
+    save_config(config)
+
+    if not args.dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    planned, already_existing, skipped = _build_download_plan(
+        client=client,
+        projects=selected_projects,
+        output_dir=output_dir,
+        minecraft_versions=minecraft_versions,
+        loaders=loaders,
+        channels=channels,
+        group_by_type=args.group_by_type,
+        console=console,
+    )
+
+    _print_plan(console, planned, already_existing, skipped, dry_run=args.dry_run)
+    if args.dry_run:
+        console.print("[yellow]Dry run: no files downloaded.[/]")
+        return 0
+
+    failures = _download_planned(console, planned)
+    _print_summary(console, planned, already_existing, skipped, failures)
+    return 1 if failures else 0
+
+
+def parse_csv(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def parse_type_selection(value: str, available_types: Iterable[str]) -> set[str]:
+    available = list(available_types)
+    available_lookup = {item.lower(): item for item in available}
+    text = value.strip()
+    if not text or text.lower() == "all":
+        return set(available)
+
+    selected: set[str] = set()
+    for item in parse_csv(text):
+        if item.isdigit():
+            index = int(item) - 1
+            if index < 0 or index >= len(available):
+                raise ValueError(f"Type number {item} is out of range.")
+            selected.add(available[index])
+            continue
+
+        match = available_lookup.get(item.lower())
+        if not match:
+            raise ValueError(f"Unknown type: {item}")
+        selected.add(match)
+    return selected
+
+
+def type_folder(project_type: str) -> str:
+    return TYPE_FOLDERS.get(project_type, project_type)
+
+
+def _get_token_for_saving(args: argparse.Namespace, console: Console) -> str | None:
+    raw_token = args.token
+    if not raw_token:
+        raw_token = getpass.getpass("Modrinth Personal Access Token: ")
+    token = normalize_token(raw_token)
+    if not token:
+        console.print("[red]Token cannot be blank.[/]")
+        return None
+    return token
+
+
+def _validate_and_report_token(token: str, console: Console) -> bool:
+    client = ModrinthClient(token=token)
+    try:
+        user = client.get_current_user()
+    except ApiError as exc:
+        _print_api_error(console, exc)
+        return False
+    username = user.get("username") or user.get("name") or "current user"
+    console.print(f"[green]Token validated for {username}.[/]")
+    return True
+
+
+def _save_token_with_warning(config: AppConfig, token: str, console: Console, *, yes: bool) -> bool:
+    console.print("[yellow]Warning: the token will be saved in plain text in the app config file.[/]")
+    console.print(f"[dim]Config path: {get_config_path()}[/]")
+    if not yes and not Confirm.ask("Save token anyway?", default=False):
+        console.print("[yellow]Token was not saved.[/]")
+        return False
+    set_token(config, token)
+    console.print(f"[green]Saved token:[/] {mask_token(token)}")
+    return True
+
+
+def _print_api_error(console: Console, exc: ApiError) -> None:
+    if exc.status_code:
+        console.print(f"[red]Modrinth API error {exc.status_code}:[/] {exc.message}")
+    else:
+        console.print(f"[red]Modrinth API error:[/] {exc.message}")
+
+
+def _order_projects(project_ids: list[str], projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {project.get("id"): project for project in projects}
+    return [by_id[project_id] for project_id in project_ids if project_id in by_id]
+
+
+def _select_types(
+    requested_types: str | None,
+    type_counts: Counter[str],
+    console: Console,
+    *,
+    yes: bool,
+) -> set[str]:
+    available = sorted(type_counts)
+    if requested_types:
+        try:
+            return parse_type_selection(requested_types, available)
+        except ValueError as exc:
+            console.print(f"[red]Invalid --types value:[/] {exc}")
+            raise SystemExit(2) from exc
+
+    if yes:
+        return set(available)
+
+    table = Table(title="Available Item Types")
+    table.add_column("#", justify="right")
+    table.add_column("Type")
+    table.add_column("Projects", justify="right")
+    for index, project_type in enumerate(available, start=1):
+        table.add_row(str(index), project_type, str(type_counts[project_type]))
+    console.print(table)
+
+    while True:
+        raw = Prompt.ask("Select item types by number/name, or all", default="all")
+        try:
+            return parse_type_selection(raw, available)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+
+
+def _optional_list(value: str | None, *, prompt: str, console: Console, yes: bool) -> list[str]:
+    if value is not None:
+        return parse_csv(value)
+    if yes:
+        return []
+    return parse_csv(Prompt.ask(prompt, default=""))
+
+
+def _get_output_dir(
+    requested_output: str | None,
+    config: AppConfig,
+    console: Console,
+    *,
+    yes: bool,
+) -> Path | None:
+    if requested_output:
+        return Path(requested_output).expanduser()
+
+    if yes:
+        if config.last_download_dir:
+            return Path(config.last_download_dir).expanduser()
+        console.print("[red]An output folder is required when --yes is used and no saved folder exists.[/]")
+        return None
+
+    default = config.last_download_dir or ""
+    prompt = "Download folder"
+    while True:
+        raw = Prompt.ask(prompt, default=default)
+        if raw.strip():
+            return Path(raw).expanduser()
+        console.print("[red]Download folder cannot be blank.[/]")
+
+
+def _build_download_plan(
+    *,
+    client: ModrinthClient,
+    projects: list[dict[str, Any]],
+    output_dir: Path,
+    minecraft_versions: list[str],
+    loaders: list[str],
+    channels: list[str],
+    group_by_type: bool,
+    console: Console,
+) -> tuple[list[PlannedDownload], list[PlannedDownload], list[SkippedProject]]:
+    planned: list[PlannedDownload] = []
+    already_existing: list[PlannedDownload] = []
+    skipped: list[SkippedProject] = []
+
+    for index, project in enumerate(projects, start=1):
+        title = project.get("title") or project.get("slug") or project.get("id")
+        console.print(f"[dim]Resolving {index}/{len(projects)}: {title}[/]")
+        try:
+            versions = client.list_project_versions(
+                project["id"],
+                minecraft_versions=minecraft_versions,
+                loaders=loaders,
+            )
+        except ApiError as exc:
+            skipped.append(SkippedProject(project, exc.message))
+            continue
+
+        version = select_version(
+            versions,
+            channels=channels,
+            minecraft_versions=minecraft_versions,
+            loaders=loaders,
+        )
+        if version is None:
+            skipped.append(SkippedProject(project, "No matching listed version."))
+            continue
+
+        file = select_version_file(version)
+        if file is None:
+            skipped.append(SkippedProject(project, "Matching version has no downloadable files."))
+            continue
+
+        target_dir = output_dir
+        if group_by_type:
+            target_dir = output_dir / type_folder(project.get("project_type", "unknown"))
+
+        destination = resolve_destination(
+            target_dir,
+            file.get("filename") or f"{project.get('slug', project['id'])}.jar",
+            project_slug=project.get("slug"),
+            version_id=version.get("id"),
+            hashes=file.get("hashes") or {},
+            size=file.get("size"),
+        )
+        item = PlannedDownload(project, version, file, destination)
+        if destination.status == "already_exists":
+            already_existing.append(item)
+        else:
+            planned.append(item)
+
+    return planned, already_existing, skipped
+
+
+def _print_plan(
+    console: Console,
+    planned: list[PlannedDownload],
+    already_existing: list[PlannedDownload],
+    skipped: list[SkippedProject],
+    *,
+    dry_run: bool,
+) -> None:
+    table = Table(title="Download Plan" if dry_run else "Ready To Download")
+    table.add_column("Project")
+    table.add_column("Type")
+    table.add_column("Version")
+    table.add_column("Status")
+    table.add_column("File")
+
+    for item in planned:
+        table.add_row(
+            item.project.get("title") or item.project.get("slug") or item.project.get("id"),
+            item.project.get("project_type", ""),
+            item.version.get("version_number", item.version.get("id", "")),
+            item.destination.status,
+            str(item.destination.path),
+        )
+    for item in already_existing:
+        table.add_row(
+            item.project.get("title") or item.project.get("slug") or item.project.get("id"),
+            item.project.get("project_type", ""),
+            item.version.get("version_number", item.version.get("id", "")),
+            "already exists",
+            str(item.destination.path),
+        )
+    console.print(table)
+
+    if skipped:
+        skip_table = Table(title="Skipped Projects")
+        skip_table.add_column("Project")
+        skip_table.add_column("Reason")
+        for item in skipped:
+            skip_table.add_row(
+                item.project.get("title") or item.project.get("slug") or item.project.get("id"),
+                item.reason,
+            )
+        console.print(skip_table)
+
+
+def _download_planned(console: Console, planned: list[PlannedDownload]) -> list[tuple[PlannedDownload, str]]:
+    failures: list[tuple[PlannedDownload, str]] = []
+    if not planned:
+        console.print("[yellow]No new files to download.[/]")
+        return failures
+
+    progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        DownloadColumn(),
+        console=console,
+    )
+    with progress:
+        for item in planned:
+            filename = item.file.get("filename") or item.destination.path.name
+            task_id = progress.add_task(filename, total=item.file.get("size"))
+            try:
+                download_file(
+                    item.file["url"],
+                    item.destination.path,
+                    hashes=item.file.get("hashes") or {},
+                    size=item.file.get("size"),
+                    progress_callback=lambda amount, task_id=task_id: progress.update(
+                        task_id,
+                        advance=amount,
+                    ),
+                )
+            except Exception as exc:
+                failures.append((item, str(exc)))
+                progress.update(task_id, description=f"{filename} failed")
+            else:
+                progress.update(task_id, completed=item.file.get("size") or 1)
+
+    return failures
+
+
+def _print_summary(
+    console: Console,
+    planned: list[PlannedDownload],
+    already_existing: list[PlannedDownload],
+    skipped: list[SkippedProject],
+    failures: list[tuple[PlannedDownload, str]],
+) -> None:
+    downloaded = len(planned) - len(failures)
+    summary = Table(title="Summary")
+    summary.add_column("Result")
+    summary.add_column("Count", justify="right")
+    summary.add_row("Downloaded", str(downloaded))
+    summary.add_row("Already existed", str(len(already_existing)))
+    summary.add_row("Skipped", str(len(skipped)))
+    summary.add_row("Failed", str(len(failures)))
+    console.print(summary)
+
+    if failures:
+        failed = Table(title="Failures")
+        failed.add_column("Project")
+        failed.add_column("Reason")
+        for item, reason in failures:
+            failed.add_row(item.project.get("title") or item.project.get("id"), reason)
+        console.print(failed)
