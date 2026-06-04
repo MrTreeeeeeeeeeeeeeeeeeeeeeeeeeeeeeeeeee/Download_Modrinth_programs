@@ -55,6 +55,17 @@ output-folder/
 
 Use `--flat` to put all downloaded files directly in the output folder.
 
+Use `--modpack-zip` to convert Modrinth modpack `.mrpack` files into full `.zip` archives. A converted modpack is always written to its own folder under `modpack`, even when `--flat` is used:
+
+```text
+output-folder/
+  modpack/
+    Pack Name/
+      Pack Name Version.zip
+```
+
+The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
+
 Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
 
 ```text
@@ -122,6 +133,7 @@ The app masks tokens in terminal output, but the config file itself contains the
 - `--flat`: download all files directly into the output folder instead of type subfolders.
 - `--group-by-type`: accepted for old scripts; type subfolders are now the default.
 - `--log-file PATH`: write the run log to a specific file, or to a folder with the default timestamped filename.
+- `--modpack-zip`: convert modpack `.mrpack` downloads into full `.zip` archives.
 - `--strict-metadata`: fail when file size or hashes differ from Modrinth metadata.
 - `--dry-run`: show planned downloads without downloading files.
 - `--yes`: use defaults and avoid prompts.

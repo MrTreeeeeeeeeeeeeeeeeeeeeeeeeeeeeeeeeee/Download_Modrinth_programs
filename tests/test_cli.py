@@ -9,12 +9,15 @@ from modrinth_collection_downloader.cli import (
     _get_channels,
     build_parser,
     loader_filter_for_project_type,
+    modpack_folder_name,
+    modpack_zip_filename,
     parse_channel_selection,
     parse_csv,
     parse_type_selection,
     type_folder,
 )
 from modrinth_collection_downloader.download import DestinationPlan
+from modrinth_collection_downloader.download import DownloadOutcome
 
 
 def test_parse_csv_trims_and_skips_empty_values():
@@ -66,6 +69,12 @@ def test_parser_supports_flat_mode():
 
     assert args.flat is True
     assert args.group_by_type is False
+
+
+def test_parser_supports_modpack_zip():
+    args = build_parser().parse_args(["abc123", "--modpack-zip"])
+
+    assert args.modpack_zip is True
 
 
 def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
@@ -210,6 +219,112 @@ def test_build_download_plan_uses_exact_type_subfolders(tmp_path):
     assert skipped == []
 
 
+def test_modpack_zip_helpers_use_safe_names():
+    project = {"title": "Bad: Pack", "slug": "bad-pack", "id": "abc"}
+    version = {"version_number": "1.0.0", "id": "version-id"}
+    file = {"filename": "Bad Pack 1.0.mrpack"}
+
+    assert modpack_folder_name(project) == "Bad_ Pack"
+    assert modpack_zip_filename(file, project, version) == "Bad Pack 1.0.zip"
+
+
+def test_build_download_plan_converts_modpack_destination_to_pack_folder(tmp_path):
+    class FakeClient:
+        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
+            return [
+                {
+                    "id": "version-id",
+                    "status": "listed",
+                    "version_type": "release",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.20.1"],
+                    "loaders": ["fabric"],
+                    "version_number": "1.0.0",
+                    "files": [
+                        {
+                            "filename": "Modpack File.mrpack",
+                            "url": "https://example.test/modpack.mrpack",
+                            "hashes": {},
+                            "primary": True,
+                            "size": 1,
+                            "file_type": None,
+                        }
+                    ],
+                }
+            ]
+
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+
+    planned, already_existing, skipped = _build_download_plan(
+        client=FakeClient(),
+        projects=[{"id": "modpack-id", "slug": "modpack-slug", "title": "Modpack Name", "project_type": "modpack"}],
+        output_dir=tmp_path,
+        minecraft_versions=["1.20.1"],
+        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
+        channels=["release"],
+        group_by_type=False,
+        modpack_zip=True,
+        console=console,
+    )
+    console.file.close()
+
+    assert already_existing == []
+    assert skipped == []
+    assert planned[0].convert_modpack_zip is True
+    assert planned[0].destination.path == tmp_path / "modpack" / "Modpack Name" / "Modpack File.zip"
+
+
+def test_build_download_plan_skips_existing_valid_converted_zip(tmp_path):
+    class FakeClient:
+        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
+            return [
+                {
+                    "id": "version-id",
+                    "status": "listed",
+                    "version_type": "release",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.20.1"],
+                    "loaders": ["fabric"],
+                    "version_number": "1.0.0",
+                    "files": [
+                        {
+                            "filename": "Pack.mrpack",
+                            "url": "https://example.test/pack.mrpack",
+                            "hashes": {},
+                            "primary": True,
+                            "size": 1,
+                            "file_type": None,
+                        }
+                    ],
+                }
+            ]
+
+    destination = tmp_path / "modpack" / "Pack Title" / "Pack.zip"
+    destination.parent.mkdir(parents=True)
+    import zipfile
+
+    with zipfile.ZipFile(destination, "w") as archive:
+        archive.writestr("mods/example.jar", b"mod")
+
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    planned, already_existing, skipped = _build_download_plan(
+        client=FakeClient(),
+        projects=[{"id": "modpack-id", "slug": "pack-title", "title": "Pack Title", "project_type": "modpack"}],
+        output_dir=tmp_path,
+        minecraft_versions=["1.20.1"],
+        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
+        channels=["release"],
+        group_by_type=True,
+        modpack_zip=True,
+        console=console,
+    )
+    console.file.close()
+
+    assert planned == []
+    assert skipped == []
+    assert already_existing[0].destination.path == destination
+
+
 def test_download_planned_prints_every_download_to_scrollback(monkeypatch, tmp_path):
     output_file = tmp_path / "console.txt"
     console = Console(file=output_file.open("w", encoding="utf-8"), width=160, force_terminal=False)
@@ -239,3 +354,45 @@ def test_download_planned_prints_every_download_to_scrollback(monkeypatch, tmp_p
     assert "Downloaded 1/2: First Mod -> first.jar" in text
     assert "Downloading 2/2: Second Mod -> second.jar" in text
     assert "Downloaded 2/2: Second Mod -> second.jar" in text
+
+
+def test_download_planned_converts_modpacks(monkeypatch, tmp_path):
+    output_file = tmp_path / "console.txt"
+    console = Console(file=output_file.open("w", encoding="utf-8"), width=160, force_terminal=False)
+    planned = [
+        PlannedDownload(
+            {"title": "Pack"},
+            {"version_number": "1.0.0"},
+            {"filename": "pack.mrpack", "url": "https://example.test/pack.mrpack", "hashes": {}, "size": 1},
+            DestinationPlan(tmp_path / "modpack" / "Pack" / "pack.zip", "new"),
+            convert_modpack_zip=True,
+        )
+    ]
+    conversions = []
+
+    def fake_download(url, destination, **kwargs):
+        destination.write_bytes(b"mrpack")
+        return DownloadOutcome()
+
+    def fake_convert(source, destination, **kwargs):
+        conversions.append((source, destination))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"zip")
+
+        class Result:
+            warning = "partial"
+            missing_files = [object()]
+
+        return Result()
+
+    monkeypatch.setattr(cli_module, "download_file", fake_download)
+    monkeypatch.setattr(cli_module, "convert_mrpack_to_zip", fake_convert)
+
+    failures = _download_planned(console, planned)
+    console.file.close()
+    text = output_file.read_text(encoding="utf-8")
+
+    assert failures == []
+    assert conversions[0][1] == tmp_path / "modpack" / "Pack" / "pack.zip"
+    assert "Converting 1/1: Pack -> pack.zip" in text
+    assert "Downloaded 1/1 with warning: Pack -> pack.zip" in text

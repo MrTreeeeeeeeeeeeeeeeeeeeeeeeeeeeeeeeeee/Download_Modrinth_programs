@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import tempfile
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,10 +28,12 @@ from .download import (
     DestinationPlan,
     download_file,
     resolve_destination,
+    sanitize_filename,
     select_version,
     select_version_file,
 )
 from .modrinth import ApiError, ModrinthClient, parse_collection_id
+from .modpack_convert import convert_mrpack_to_zip
 from .run_log import RunLog, resolve_log_path
 
 
@@ -47,6 +51,7 @@ class PlannedDownload:
     version: dict[str, Any]
     file: dict[str, Any]
     destination: DestinationPlan
+    convert_modpack_zip: bool = False
 
 
 @dataclass
@@ -100,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-file", help="Log file path, or a folder for the default log filename.")
     parser.add_argument(
+        "--modpack-zip",
+        action="store_true",
+        help="Convert modpack .mrpack files into full .zip archives.",
+    )
+    parser.add_argument(
         "--strict-metadata",
         action="store_true",
         help="Fail when downloaded file size or hashes differ from Modrinth metadata.",
@@ -128,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         plugin_loaders=args.plugin_loaders or "(any)",
         channels=args.channels or f"(prompt/default {','.join(DEFAULT_CHANNELS)})",
         dry_run=args.dry_run,
+        modpack_zip=args.modpack_zip,
         strict_metadata=args.strict_metadata,
         type_subfolders=type_subfolders,
         flat=args.flat,
@@ -343,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         loader_filters=loader_filters,
         channels=channels,
         group_by_type=type_subfolders,
+        modpack_zip=args.modpack_zip,
         console=console,
         run_log=run_log,
     )
@@ -598,6 +610,53 @@ def _print_type_summary(console: Console, type_counts: Counter[str]) -> None:
     console.print(table)
 
 
+def modpack_folder_name(project: dict[str, Any]) -> str:
+    return sanitize_filename(str(project.get("title") or project.get("slug") or project.get("id") or "modpack"))
+
+
+def modpack_zip_filename(
+    file: dict[str, Any],
+    project: dict[str, Any],
+    version: dict[str, Any],
+) -> str:
+    fallback = f"{project.get('slug') or project.get('id') or 'modpack'}-{version.get('version_number') or version.get('id') or 'version'}.mrpack"
+    filename = sanitize_filename(str(file.get("filename") or fallback))
+    path = Path(filename)
+    if path.suffix.lower() == ".mrpack":
+        return f"{path.stem}.zip"
+    if path.suffix.lower() == ".zip":
+        return filename
+    return f"{filename}.zip"
+
+
+def resolve_modpack_zip_destination(
+    pack_dir: Path,
+    filename: str,
+    *,
+    project_slug: str | None,
+    version_id: str | None,
+) -> DestinationPlan:
+    candidate = pack_dir / sanitize_filename(filename)
+    if candidate.exists() and _is_valid_zip_file(candidate):
+        return DestinationPlan(candidate, "already_exists", "Existing converted zip is valid.")
+    return resolve_destination(
+        pack_dir,
+        filename,
+        project_slug=project_slug,
+        version_id=version_id,
+        hashes={},
+        size=None,
+    )
+
+
+def _is_valid_zip_file(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return bool(archive.infolist()) and archive.testzip() is None
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def _build_download_plan(
     *,
     client: ModrinthClient,
@@ -608,6 +667,7 @@ def _build_download_plan(
     channels: list[str],
     group_by_type: bool,
     console: Console,
+    modpack_zip: bool = False,
     run_log: RunLog | None = None,
 ) -> tuple[list[PlannedDownload], list[PlannedDownload], list[SkippedProject]]:
     planned: list[PlannedDownload] = []
@@ -662,19 +722,30 @@ def _build_download_plan(
                 run_log.add("Project skipped", title=title, reason="Matching version has no downloadable files.")
             continue
 
-        target_dir = output_dir
-        if group_by_type:
-            target_dir = output_dir / type_folder(project.get("project_type", "unknown"))
+        project_type = project.get("project_type", "unknown")
+        if modpack_zip and project_type == "modpack":
+            pack_dir = output_dir / "modpack" / modpack_folder_name(project)
+            destination = resolve_modpack_zip_destination(
+                pack_dir,
+                modpack_zip_filename(file, project, version),
+                project_slug=project.get("slug"),
+                version_id=version.get("id"),
+            )
+            item = PlannedDownload(project, version, file, destination, convert_modpack_zip=True)
+        else:
+            target_dir = output_dir
+            if group_by_type:
+                target_dir = output_dir / type_folder(project_type)
 
-        destination = resolve_destination(
-            target_dir,
-            file.get("filename") or f"{project.get('slug', project['id'])}.jar",
-            project_slug=project.get("slug"),
-            version_id=version.get("id"),
-            hashes=file.get("hashes") or {},
-            size=file.get("size"),
-        )
-        item = PlannedDownload(project, version, file, destination)
+            destination = resolve_destination(
+                target_dir,
+                file.get("filename") or f"{project.get('slug', project['id'])}.jar",
+                project_slug=project.get("slug"),
+                version_id=version.get("id"),
+                hashes=file.get("hashes") or {},
+                size=file.get("size"),
+            )
+            item = PlannedDownload(project, version, file, destination)
         if destination.status == "already_exists":
             already_existing.append(item)
             if run_log:
@@ -685,18 +756,21 @@ def _build_download_plan(
                     filename=file.get("filename"),
                     destination=destination.path,
                     reason=destination.reason,
+                    converted_modpack=item.convert_modpack_zip,
                 )
         else:
             planned.append(item)
             if run_log:
                 run_log.add(
-                    "File planned",
+                    "Converted modpack planned" if item.convert_modpack_zip else "File planned",
                     title=title,
                     version=version.get("version_number"),
                     filename=file.get("filename"),
                     destination=destination.path,
                     status=destination.status,
                     size=file.get("size"),
+                    pack_folder=destination.path.parent if item.convert_modpack_zip else "(none)",
+                    converted_modpack=item.convert_modpack_zip,
                 )
 
     return planned, already_existing, skipped
@@ -774,6 +848,21 @@ def _download_planned(
         for index, item in enumerate(planned, start=1):
             filename = item.file.get("filename") or item.destination.path.name
             project_name = item.project.get("title") or item.project.get("slug") or item.project.get("id")
+            if item.convert_modpack_zip:
+                error = _download_converted_modpack(
+                    progress,
+                    item,
+                    project_name=project_name,
+                    source_filename=filename,
+                    index=index,
+                    total=total,
+                    strict_metadata=strict_metadata,
+                    run_log=run_log,
+                )
+                if error:
+                    failures.append((item, error))
+                continue
+
             progress.console.print(f"[cyan]Downloading {index}/{total}:[/] {project_name} -> {filename}")
             task_id = progress.add_task(filename, total=item.file.get("size"))
             if run_log:
@@ -839,6 +928,116 @@ def _download_planned(
                     )
 
     return failures
+
+
+def _download_converted_modpack(
+    progress: Progress,
+    item: PlannedDownload,
+    *,
+    project_name: str,
+    source_filename: str,
+    index: int,
+    total: int,
+    strict_metadata: bool,
+    run_log: RunLog | None,
+) -> str | None:
+    progress.console.print(f"[cyan]Downloading {index}/{total}:[/] {project_name} -> {source_filename}")
+    task_id = progress.add_task(source_filename, total=item.file.get("size"))
+    task_removed = False
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            source_path = temp_dir / sanitize_filename(source_filename)
+            if run_log:
+                run_log.add(
+                    "Modpack source download started",
+                    title=project_name,
+                    filename=source_filename,
+                    source=source_path,
+                    destination=item.destination.path,
+                    size=item.file.get("size"),
+                    index=index,
+                    total=total,
+                )
+            source_outcome = download_file(
+                item.file["url"],
+                source_path,
+                hashes=item.file.get("hashes") or {},
+                size=item.file.get("size"),
+                progress_callback=lambda amount, task_id=task_id: progress.update(task_id, advance=amount),
+                progress_reset_callback=lambda task_id=task_id: progress.update(task_id, completed=0),
+                strict_metadata=strict_metadata,
+            )
+            progress.update(task_id, completed=item.file.get("size") or 1)
+            progress.remove_task(task_id)
+            task_removed = True
+            if run_log:
+                run_log.add(
+                    "Modpack source download finished",
+                    title=project_name,
+                    filename=source_filename,
+                    source=source_path,
+                    destination=item.destination.path,
+                    warning=source_outcome.warning or "(none)",
+                    attempts=source_outcome.attempts,
+                    index=index,
+                    total=total,
+                )
+
+            progress.console.print(
+                f"[cyan]Converting {index}/{total}:[/] {project_name} -> {item.destination.path.name}"
+            )
+            result = convert_mrpack_to_zip(
+                source_path,
+                item.destination.path,
+                strict_metadata=strict_metadata,
+                progress_callback=lambda message: progress.console.print(f"[dim]  {message}[/]"),
+                run_log=run_log,
+            )
+    except Exception as exc:
+        if not task_removed:
+            progress.remove_task(task_id)
+        progress.console.print(
+            f"[red]Failed {index}/{total}:[/] {project_name} -> {item.destination.path.name}: {exc}"
+        )
+        if run_log:
+            run_log.add(
+                "Download failed",
+                title=project_name,
+                filename=item.destination.path.name,
+                destination=item.destination.path,
+                error=exc,
+                converted_modpack=True,
+                index=index,
+                total=total,
+            )
+        return str(exc)
+
+    warning_parts = [warning for warning in (source_outcome.warning, result.warning) if warning]
+    warning = " ".join(warning_parts)
+    if warning:
+        progress.console.print(
+            f"[yellow]Downloaded {index}/{total} with warning:[/] {project_name} -> {item.destination.path.name}"
+        )
+        progress.console.print(f"[yellow]{warning}[/]")
+    else:
+        progress.console.print(
+            f"[green]Downloaded {index}/{total}:[/] {project_name} -> {item.destination.path.name}"
+        )
+    if run_log:
+        run_log.add(
+            "Download finished",
+            title=project_name,
+            filename=item.destination.path.name,
+            destination=item.destination.path,
+            warning=warning or "(none)",
+            attempts=getattr(source_outcome, "attempts", 1),
+            converted_modpack=True,
+            missing_files=len(result.missing_files),
+            index=index,
+            total=total,
+        )
+    return None
 
 
 def _print_summary(
