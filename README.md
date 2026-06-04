@@ -24,7 +24,7 @@ Direct collection URL:
 python -m modrinth_collection_downloader "https://modrinth.com/collection/gRlE8phg/mods"
 ```
 
-Non-interactive dry run:
+Non-interactive dry run with release-only versions:
 
 ```powershell
 python -m modrinth_collection_downloader gRlE8phg -o "C:\Minecraft\mods" --types mod --minecraft-version 1.21.1 --loaders fabric --channels release --dry-run --yes
@@ -36,6 +36,10 @@ The app fetches the collection before asking filter questions, then shows the it
 - Shaders use a separate shader loader prompt or `--shader-loaders`.
 - Plugins use a separate plugin platform prompt or `--plugin-loaders`.
 - Resource packs and datapacks are never filtered by loader, even when a mod loader is specified.
+
+Interactive runs also ask which version channels to use. The default is `release,beta` because some common collection items, including resource packs, publish compatible versions as beta. Pass `--channels release` when you want release-only downloads.
+
+Minecraft version matching handles versions that list several compatible game versions, and also treats minor-series entries like `1.20` or `1.20.x` as compatible with patch versions such as `1.20.1`.
 
 By default, every downloaded file is placed in a subfolder named for its Modrinth project type:
 
@@ -107,7 +111,7 @@ The app masks tokens in terminal output, but the config file itself contains the
 - `--loaders fabric,forge,neoforge,quilt`: optional mod/modpack loader filter. `--mod-loaders` is also accepted.
 - `--shader-loaders iris,optifine,canvas,vanilla`: optional shader loader filter.
 - `--plugin-loaders paper,spigot,purpur,folia,velocity`: optional plugin platform filter.
-- `--channels release,beta,alpha`: release channels; default is `release`.
+- `--channels release,beta,alpha`: version channels; default is `release,beta`.
 - `--token TOKEN`: token for this run.
 - `--save-token`: save the provided or prompted token.
 - `--set-token`: prompt for, validate, and save a token.

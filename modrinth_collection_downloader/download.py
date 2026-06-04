@@ -14,6 +14,7 @@ from .modrinth import DEFAULT_USER_AGENT
 
 
 SKIPPED_FILE_TYPES = {"sources-jar", "dev-jar", "javadoc-jar", "signature"}
+MINECRAFT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+|x|\*))?$", re.IGNORECASE)
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -87,8 +88,8 @@ def select_version(
             continue
 
         if wanted_versions:
-            actual_versions = {str(value) for value in version.get("game_versions", [])}
-            if not wanted_versions.intersection(actual_versions):
+            actual_versions = [str(value) for value in version.get("game_versions", [])]
+            if not minecraft_versions_overlap(wanted_versions, actual_versions):
                 continue
 
         if wanted_loaders:
@@ -100,6 +101,52 @@ def select_version(
 
     matches.sort(key=lambda item: _parse_modrinth_date(item.get("date_published")), reverse=True)
     return matches[0] if matches else None
+
+
+def minecraft_versions_overlap(
+    wanted_versions: Iterable[str],
+    actual_versions: Iterable[str],
+) -> bool:
+    wanted = [version.strip() for version in wanted_versions if version.strip()]
+    actual = [version.strip() for version in actual_versions if version.strip()]
+    if not wanted:
+        return True
+    return any(
+        _minecraft_version_matches(wanted_version, actual_version)
+        for wanted_version in wanted
+        for actual_version in actual
+    )
+
+
+def _minecraft_version_matches(wanted_version: str, actual_version: str) -> bool:
+    wanted = wanted_version.strip().lower()
+    actual = actual_version.strip().lower()
+    if wanted == actual:
+        return True
+
+    wanted_parts = _parse_minecraft_version(wanted)
+    actual_parts = _parse_minecraft_version(actual)
+    if wanted_parts is None or actual_parts is None:
+        return False
+
+    wanted_major, wanted_minor, wanted_patch = wanted_parts
+    actual_major, actual_minor, actual_patch = actual_parts
+    if wanted_major != actual_major or wanted_minor != actual_minor:
+        return False
+
+    return (
+        wanted_patch is None
+        or actual_patch is None
+        or wanted_patch in {"x", "*"}
+        or actual_patch in {"x", "*"}
+    )
+
+
+def _parse_minecraft_version(version: str) -> tuple[int, int, str | None] | None:
+    match = MINECRAFT_VERSION_RE.fullmatch(version)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), match.group(3)
 
 
 def select_version_file(version: dict[str, Any]) -> dict[str, Any] | None:

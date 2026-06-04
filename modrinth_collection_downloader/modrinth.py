@@ -17,6 +17,7 @@ BASE_V2 = "https://api.modrinth.com/v2"
 BASE_V3 = "https://api.modrinth.com/v3"
 DEFAULT_USER_AGENT = f"modrinth-collection-downloader/{__version__} (local-cli)"
 COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9]+$")
+MINECRAFT_PATCH_VERSION_RE = re.compile(r"^(\d+\.\d+)\.\d+$")
 
 
 class ApiError(RuntimeError):
@@ -152,13 +153,37 @@ class ModrinthClient:
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"include_changelog": "false"}
         if minecraft_versions:
-            params["game_versions"] = json.dumps(minecraft_versions, separators=(",", ":"))
+            params["game_versions"] = json.dumps(
+                expand_minecraft_version_query(minecraft_versions),
+                separators=(",", ":"),
+            )
         if loaders:
             params["loaders"] = json.dumps(loaders, separators=(",", ":"))
 
         project_id = quote(project_id, safe="")
         data = self.get_json(f"{BASE_V2}/project/{project_id}/version", params=params)
         return data if isinstance(data, list) else []
+
+
+def expand_minecraft_version_query(minecraft_versions: Iterable[str]) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for value in minecraft_versions:
+        version = str(value).strip()
+        if not version:
+            continue
+        for candidate in (version, _minor_minecraft_version(version)):
+            if candidate and candidate not in seen:
+                expanded.append(candidate)
+                seen.add(candidate)
+    return expanded
+
+
+def _minor_minecraft_version(version: str) -> str | None:
+    match = MINECRAFT_PATCH_VERSION_RE.fullmatch(version)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def _rate_limit_sleep(response: requests.Response) -> float:

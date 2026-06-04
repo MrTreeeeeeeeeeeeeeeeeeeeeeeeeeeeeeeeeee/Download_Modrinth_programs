@@ -37,6 +37,7 @@ MOD_LOADER_TYPES = {"mod", "modpack"}
 SHADER_LOADER_TYPES = {"shader"}
 PLUGIN_LOADER_TYPES = {"plugin"}
 NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
+DEFAULT_CHANNELS = ["release", "beta"]
 
 
 @dataclass
@@ -76,7 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--plugin-loaders",
         help="Comma-separated plugin platform filter, for example paper,spigot,purpur,folia,velocity.",
     )
-    parser.add_argument("--channels", default="release", help="Comma-separated release channels.")
+    parser.add_argument(
+        "--channels",
+        help="Comma-separated release channels. Default: release,beta.",
+    )
     parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
     parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
     parser.add_argument("--set-token", action="store_true", help="Prompt for, validate, and save a token.")
@@ -116,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         mod_loaders=args.mod_loaders or "(any)",
         shader_loaders=args.shader_loaders or "(any)",
         plugin_loaders=args.plugin_loaders or "(any)",
-        channels=args.channels,
+        channels=args.channels or f"(prompt/default {','.join(DEFAULT_CHANNELS)})",
         dry_run=args.dry_run,
         type_subfolders=type_subfolders,
         flat=args.flat,
@@ -296,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         yes=args.yes,
     )
     loader_filters = _get_loader_filters_for_selected_types(args, selected_types, console, yes=args.yes)
-    channels = parse_csv(args.channels) or ["release"]
+    channels = _get_channels(args.channels, console, yes=args.yes)
     run_log.add(
         "Version filters selected",
         minecraft_versions=minecraft_versions,
@@ -527,6 +531,15 @@ def _optional_list(value: str | None, *, prompt: str, console: Console, yes: boo
     if yes:
         return []
     return parse_csv(Prompt.ask(prompt, default=""))
+
+
+def _get_channels(value: str | None, console: Console, *, yes: bool) -> list[str]:
+    if value is not None:
+        return parse_csv(value) or list(DEFAULT_CHANNELS)
+    if yes:
+        return list(DEFAULT_CHANNELS)
+    raw_channels = Prompt.ask("Version channels, comma-separated", default=",".join(DEFAULT_CHANNELS))
+    return parse_csv(raw_channels) or list(DEFAULT_CHANNELS)
 
 
 def _get_output_dir(

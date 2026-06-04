@@ -1,6 +1,12 @@
+import json
+
 import pytest
 
-from modrinth_collection_downloader.modrinth import ModrinthClient, parse_collection_id
+from modrinth_collection_downloader.modrinth import (
+    ModrinthClient,
+    expand_minecraft_version_query,
+    parse_collection_id,
+)
 
 
 class FakeResponse:
@@ -55,3 +61,22 @@ def test_authorization_header_is_omitted_without_token():
 
     headers = session.calls[0][2]["headers"]
     assert "Authorization" not in headers
+
+
+def test_expand_minecraft_version_query_includes_minor_series():
+    assert expand_minecraft_version_query(["1.20.1", "1.20", "1.21.4"]) == [
+        "1.20.1",
+        "1.20",
+        "1.21.4",
+        "1.21",
+    ]
+
+
+def test_project_versions_query_expands_patch_version_filter():
+    session = FakeSession()
+    client = ModrinthClient(session=session)
+
+    client.list_project_versions("project-id", minecraft_versions=["1.20.1"])
+
+    params = session.calls[0][2]["params"]
+    assert json.loads(params["game_versions"]) == ["1.20.1", "1.20"]

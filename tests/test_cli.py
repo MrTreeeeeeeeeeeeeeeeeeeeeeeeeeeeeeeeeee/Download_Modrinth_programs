@@ -6,6 +6,7 @@ from modrinth_collection_downloader.cli import (
     PlannedDownload,
     _build_download_plan,
     _download_planned,
+    _get_channels,
     build_parser,
     loader_filter_for_project_type,
     parse_csv,
@@ -64,6 +65,15 @@ def test_parser_supports_flat_mode():
 
     assert args.flat is True
     assert args.group_by_type is False
+
+
+def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+
+    channels = _get_channels(None, console, yes=True)
+    console.file.close()
+
+    assert channels == ["release", "beta"]
 
 
 def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):

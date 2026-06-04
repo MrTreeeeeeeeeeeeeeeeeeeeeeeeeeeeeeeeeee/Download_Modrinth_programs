@@ -72,6 +72,72 @@ def test_select_version_returns_none_when_filters_do_not_match():
     )
 
 
+def test_select_version_matches_requested_version_inside_multi_version_list():
+    versions = [
+        {
+            "id": "fresh-animations",
+            "status": "listed",
+            "version_type": "beta",
+            "date_published": "2026-01-01T00:00:00Z",
+            "game_versions": ["1.20", "1.20.1", "1.20.2", "1.21"],
+            "loaders": ["minecraft"],
+        }
+    ]
+
+    selected = select_version(
+        versions,
+        channels=["release", "beta"],
+        minecraft_versions=["1.20.1"],
+        loaders=[],
+    )
+
+    assert selected["id"] == "fresh-animations"
+
+
+def test_select_version_matches_minor_series_version():
+    versions = [
+        {
+            "id": "minor-series",
+            "status": "listed",
+            "version_type": "release",
+            "date_published": "2026-01-01T00:00:00Z",
+            "game_versions": ["1.20"],
+            "loaders": ["minecraft"],
+        }
+    ]
+
+    selected = select_version(
+        versions,
+        channels=["release"],
+        minecraft_versions=["1.20.1"],
+        loaders=[],
+    )
+
+    assert selected["id"] == "minor-series"
+
+
+def test_select_version_matches_wildcard_series_version():
+    versions = [
+        {
+            "id": "wildcard-series",
+            "status": "listed",
+            "version_type": "release",
+            "date_published": "2026-01-01T00:00:00Z",
+            "game_versions": ["1.20.x"],
+            "loaders": ["minecraft"],
+        }
+    ]
+
+    selected = select_version(
+        versions,
+        channels=["release"],
+        minecraft_versions=["1.20.1"],
+        loaders=[],
+    )
+
+    assert selected["id"] == "wildcard-series"
+
+
 def test_select_version_file_prefers_primary_normal_file():
     version = {
         "files": [
