@@ -37,6 +37,20 @@ The app fetches the collection before asking filter questions, then shows the it
 - Plugins use a separate plugin platform prompt or `--plugin-loaders`.
 - Resource packs and datapacks are never filtered by loader, even when a mod loader is specified.
 
+By default, every downloaded file is placed in a subfolder named for its Modrinth project type:
+
+```text
+output-folder/
+  mod/
+  modpack/
+  resourcepack/
+  shader/
+  plugin/
+  datapack/
+```
+
+Use `--flat` to put all downloaded files directly in the output folder.
+
 Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
 
 ```text
@@ -99,7 +113,8 @@ The app masks tokens in terminal output, but the config file itself contains the
 - `--set-token`: prompt for, validate, and save a token.
 - `--forget-token`: remove the saved token.
 - `--no-token`: ignore saved and environment tokens.
-- `--group-by-type`: download into project type subfolders.
+- `--flat`: download all files directly into the output folder instead of type subfolders.
+- `--group-by-type`: accepted for old scripts; type subfolders are now the default.
 - `--log-file PATH`: write the run log to a specific file, or to a folder with the default timestamped filename.
 - `--dry-run`: show planned downloads without downloading files.
 - `--yes`: use defaults and avoid prompts.

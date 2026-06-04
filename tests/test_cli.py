@@ -35,9 +35,9 @@ def test_parse_type_selection_rejects_invalid_values():
         parse_type_selection("plugin", ["mod"])
 
 
-def test_type_folder_uses_known_plural_names():
-    assert type_folder("mod") == "mods"
-    assert type_folder("minecraft_java_server") == "minecraft_java_servers"
+def test_type_folder_uses_exact_project_type_names():
+    assert type_folder("mod") == "mod"
+    assert type_folder("minecraft_java_server") == "minecraft_java_server"
     assert type_folder("unknown") == "unknown"
 
 
@@ -57,6 +57,13 @@ def test_parser_keeps_loaders_as_mod_loader_filter():
 
     assert args.mod_loaders == "fabric"
     assert args.shader_loaders == "iris"
+
+
+def test_parser_supports_flat_mode():
+    args = build_parser().parse_args(["abc123", "--flat"])
+
+    assert args.flat is True
+    assert args.group_by_type is False
 
 
 def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
@@ -132,6 +139,57 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
         ("plugin-id", ["paper"]),
     ]
     assert len(planned) == 5
+    assert already_existing == []
+    assert skipped == []
+
+
+def test_build_download_plan_uses_exact_type_subfolders(tmp_path):
+    class FakeClient:
+        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
+            return [
+                {
+                    "id": f"{project_id}-version",
+                    "status": "listed",
+                    "version_type": "release",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.20.1"],
+                    "loaders": ["fabric"],
+                    "version_number": "1.0.0",
+                    "files": [
+                        {
+                            "filename": f"{project_id}.jar",
+                            "url": f"https://example.test/{project_id}.jar",
+                            "hashes": {},
+                            "primary": True,
+                            "size": 1,
+                            "file_type": None,
+                        }
+                    ],
+                }
+            ]
+
+    projects = [
+        {"id": "mod-id", "slug": "mod-slug", "title": "Mod", "project_type": "mod"},
+        {"id": "modpack-id", "slug": "modpack-slug", "title": "Modpack", "project_type": "modpack"},
+    ]
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+
+    planned, already_existing, skipped = _build_download_plan(
+        client=FakeClient(),
+        projects=projects,
+        output_dir=tmp_path,
+        minecraft_versions=["1.20.1"],
+        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
+        channels=["release"],
+        group_by_type=True,
+        console=console,
+    )
+    console.file.close()
+
+    assert [item.destination.path for item in planned] == [
+        tmp_path / "mod" / "mod-id.jar",
+        tmp_path / "modpack" / "modpack-id.jar",
+    ]
     assert already_existing == []
     assert skipped == []
 

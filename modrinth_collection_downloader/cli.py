@@ -33,15 +33,6 @@ from .modrinth import ApiError, ModrinthClient, parse_collection_id
 from .run_log import RunLog, resolve_log_path
 
 
-TYPE_FOLDERS = {
-    "mod": "mods",
-    "modpack": "modpacks",
-    "resourcepack": "resourcepacks",
-    "shader": "shaders",
-    "plugin": "plugins",
-    "datapack": "datapacks",
-    "minecraft_java_server": "minecraft_java_servers",
-}
 MOD_LOADER_TYPES = {"mod", "modpack"}
 SHADER_LOADER_TYPES = {"shader"}
 PLUGIN_LOADER_TYPES = {"plugin"}
@@ -91,7 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--set-token", action="store_true", help="Prompt for, validate, and save a token.")
     parser.add_argument("--forget-token", action="store_true", help="Remove the saved token.")
     parser.add_argument("--no-token", action="store_true", help="Ignore saved and environment tokens.")
-    parser.add_argument("--group-by-type", action="store_true", help="Download into type subfolders.")
+    folder_group = parser.add_mutually_exclusive_group()
+    folder_group.add_argument(
+        "--group-by-type",
+        action="store_true",
+        help="Deprecated; type subfolders are now used by default.",
+    )
+    folder_group.add_argument(
+        "--flat",
+        action="store_true",
+        help="Download all files directly into the output folder instead of type subfolders.",
+    )
     parser.add_argument("--log-file", help="Log file path, or a folder for the default log filename.")
     parser.add_argument("--dry-run", action="store_true", help="Show planned downloads only.")
     parser.add_argument("--yes", action="store_true", help="Use defaults and do not prompt.")
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     run_log = RunLog()
     config_path = get_config_path()
     selected_output_dir: Path | None = None
+    type_subfolders = args.group_by_type or not args.flat
 
     run_log.add(
         "Run started",
@@ -116,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         plugin_loaders=args.plugin_loaders or "(any)",
         channels=args.channels,
         dry_run=args.dry_run,
-        group_by_type=args.group_by_type,
+        type_subfolders=type_subfolders,
+        flat=args.flat,
         token_argument_provided=bool(args.token),
         save_token=args.save_token,
         set_token=args.set_token,
@@ -311,7 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     selected_output_dir = output_dir
     remember_download_dir(config, output_dir)
     save_config(config)
-    run_log.add("Download folder selected and saved", output_dir=output_dir)
+    run_log.add("Download folder selected and saved", output_dir=output_dir, type_subfolders=type_subfolders)
+    if type_subfolders:
+        console.print("[dim]Files will be placed in type subfolders such as mod, modpack, and resourcepack.[/]")
+    else:
+        console.print("[dim]Flat mode enabled: files will be placed directly in the output folder.[/]")
 
     if not args.dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -324,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         minecraft_versions=minecraft_versions,
         loader_filters=loader_filters,
         channels=channels,
-        group_by_type=args.group_by_type,
+        group_by_type=type_subfolders,
         console=console,
         run_log=run_log,
     )
@@ -384,7 +391,7 @@ def parse_type_selection(value: str, available_types: Iterable[str]) -> set[str]
 
 
 def type_folder(project_type: str) -> str:
-    return TYPE_FOLDERS.get(project_type, project_type)
+    return project_type or "unknown"
 
 
 def loader_filter_for_project_type(project_type: str, loader_filters: dict[str, list[str]]) -> list[str]:
