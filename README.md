@@ -30,6 +30,13 @@ Non-interactive dry run:
 python -m modrinth_collection_downloader gRlE8phg -o "C:\Minecraft\mods" --types mod --minecraft-version 1.21.1 --loaders fabric --channels release --dry-run --yes
 ```
 
+The app fetches the collection before asking filter questions, then shows the item types and counts in the collection. Loader prompts are only shown for selected item types that use them:
+
+- Mods and modpacks use the mod loader prompt or `--loaders` / `--mod-loaders`.
+- Shaders use a separate shader loader prompt or `--shader-loaders`.
+- Plugins use a separate plugin platform prompt or `--plugin-loaders`.
+- Resource packs and datapacks are never filtered by loader, even when a mod loader is specified.
+
 Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
 
 ```text
@@ -83,7 +90,9 @@ The app masks tokens in terminal output, but the config file itself contains the
 - `-o, --output PATH`: folder to download into.
 - `--types mod,shader,...`: selected project types.
 - `--minecraft-version VERSION`: optional Minecraft version filter.
-- `--loaders fabric,forge,neoforge,quilt,minecraft`: optional loader filter.
+- `--loaders fabric,forge,neoforge,quilt`: optional mod/modpack loader filter. `--mod-loaders` is also accepted.
+- `--shader-loaders iris,optifine,canvas,vanilla`: optional shader loader filter.
+- `--plugin-loaders paper,spigot,purpur,folia,velocity`: optional plugin platform filter.
 - `--channels release,beta,alpha`: release channels; default is `release`.
 - `--token TOKEN`: token for this run.
 - `--save-token`: save the provided or prompted token.

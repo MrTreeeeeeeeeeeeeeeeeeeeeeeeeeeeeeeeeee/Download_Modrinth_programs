@@ -4,7 +4,10 @@ from rich.console import Console
 from modrinth_collection_downloader import cli as cli_module
 from modrinth_collection_downloader.cli import (
     PlannedDownload,
+    _build_download_plan,
     _download_planned,
+    build_parser,
+    loader_filter_for_project_type,
     parse_csv,
     parse_type_selection,
     type_folder,
@@ -36,6 +39,101 @@ def test_type_folder_uses_known_plural_names():
     assert type_folder("mod") == "mods"
     assert type_folder("minecraft_java_server") == "minecraft_java_servers"
     assert type_folder("unknown") == "unknown"
+
+
+def test_loader_filter_for_project_type_uses_type_specific_filters():
+    filters = {"mod": ["fabric"], "shader": ["iris"], "plugin": ["paper"]}
+
+    assert loader_filter_for_project_type("mod", filters) == ["fabric"]
+    assert loader_filter_for_project_type("modpack", filters) == ["fabric"]
+    assert loader_filter_for_project_type("shader", filters) == ["iris"]
+    assert loader_filter_for_project_type("plugin", filters) == ["paper"]
+    assert loader_filter_for_project_type("resourcepack", filters) == []
+    assert loader_filter_for_project_type("datapack", filters) == []
+
+
+def test_parser_keeps_loaders_as_mod_loader_filter():
+    args = build_parser().parse_args(["abc123", "--loaders", "fabric", "--shader-loaders", "iris"])
+
+    assert args.mod_loaders == "fabric"
+    assert args.shader_loaders == "iris"
+
+
+def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
+            self.calls.append((project_id, list(loaders or [])))
+            return [
+                {
+                    "id": f"{project_id}-version",
+                    "status": "listed",
+                    "version_type": "release",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.20.1"],
+                    "loaders": _version_loaders(project_id),
+                    "version_number": "1.0.0",
+                    "files": [
+                        {
+                            "filename": f"{project_id}.jar",
+                            "url": f"https://example.test/{project_id}.jar",
+                            "hashes": {},
+                            "primary": True,
+                            "size": 1,
+                            "file_type": None,
+                        }
+                    ],
+                }
+            ]
+
+    def _version_loaders(project_id):
+        return {
+            "mod-id": ["fabric"],
+            "resourcepack-id": ["minecraft"],
+            "datapack-id": ["datapack"],
+            "shader-id": ["iris"],
+            "plugin-id": ["paper"],
+        }[project_id]
+
+    projects = [
+        {"id": "mod-id", "slug": "mod-slug", "title": "Mod", "project_type": "mod"},
+        {
+            "id": "resourcepack-id",
+            "slug": "resourcepack-slug",
+            "title": "Resource Pack",
+            "project_type": "resourcepack",
+        },
+        {"id": "datapack-id", "slug": "datapack-slug", "title": "Data Pack", "project_type": "datapack"},
+        {"id": "shader-id", "slug": "shader-slug", "title": "Shader", "project_type": "shader"},
+        {"id": "plugin-id", "slug": "plugin-slug", "title": "Plugin", "project_type": "plugin"},
+    ]
+    client = FakeClient()
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+
+    planned, already_existing, skipped = _build_download_plan(
+        client=client,
+        projects=projects,
+        output_dir=tmp_path,
+        minecraft_versions=["1.20.1"],
+        loader_filters={"mod": ["fabric"], "shader": ["iris"], "plugin": ["paper"]},
+        channels=["release"],
+        group_by_type=False,
+        console=console,
+    )
+    console.file.close()
+
+    assert [(project_id, loaders) for project_id, loaders in client.calls] == [
+        ("mod-id", ["fabric"]),
+        ("resourcepack-id", []),
+        ("datapack-id", []),
+        ("shader-id", ["iris"]),
+        ("plugin-id", ["paper"]),
+    ]
+    assert len(planned) == 5
+    assert already_existing == []
+    assert skipped == []
 
 
 def test_download_planned_prints_every_download_to_scrollback(monkeypatch, tmp_path):

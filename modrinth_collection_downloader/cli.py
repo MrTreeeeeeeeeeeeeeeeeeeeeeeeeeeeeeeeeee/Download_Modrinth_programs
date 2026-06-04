@@ -42,6 +42,10 @@ TYPE_FOLDERS = {
     "datapack": "datapacks",
     "minecraft_java_server": "minecraft_java_servers",
 }
+MOD_LOADER_TYPES = {"mod", "modpack"}
+SHADER_LOADER_TYPES = {"shader"}
+PLUGIN_LOADER_TYPES = {"plugin"}
+NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
 
 
 @dataclass
@@ -67,7 +71,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", help="Folder to download into.")
     parser.add_argument("--types", help="Comma-separated project types to download.")
     parser.add_argument("--minecraft-version", help="Optional Minecraft version filter.")
-    parser.add_argument("--loaders", help="Comma-separated loader filter.")
+    parser.add_argument(
+        "--loaders",
+        "--mod-loaders",
+        dest="mod_loaders",
+        help="Comma-separated mod/modpack loader filter, for example fabric,forge,neoforge,quilt.",
+    )
+    parser.add_argument(
+        "--shader-loaders",
+        help="Comma-separated shader loader filter, for example iris,optifine,canvas,vanilla.",
+    )
+    parser.add_argument(
+        "--plugin-loaders",
+        help="Comma-separated plugin platform filter, for example paper,spigot,purpur,folia,velocity.",
+    )
     parser.add_argument("--channels", default="release", help="Comma-separated release channels.")
     parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
     parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
@@ -94,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output or "(prompt)",
         types=args.types or "(prompt/all)",
         minecraft_version=args.minecraft_version or "(any)",
-        loaders=args.loaders or "(any)",
+        mod_loaders=args.mod_loaders or "(any)",
+        shader_loaders=args.shader_loaders or "(any)",
+        plugin_loaders=args.plugin_loaders or "(any)",
         channels=args.channels,
         dry_run=args.dry_run,
         group_by_type=args.group_by_type,
@@ -250,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     ordered_projects = _order_projects(project_ids, projects)
     type_counts = Counter(project.get("project_type", "unknown") for project in ordered_projects)
     run_log.add("Project metadata fetched", returned_project_count=len(ordered_projects), type_counts=dict(type_counts))
+    _print_type_summary(console, type_counts)
     try:
         selected_types = _select_types(args.types, type_counts, console, yes=args.yes)
     except ValueError as exc:
@@ -272,17 +292,15 @@ def main(argv: list[str] | None = None) -> int:
         console=console,
         yes=args.yes,
     )
-    loaders = _optional_list(
-        args.loaders,
-        prompt="Loader filter, comma-separated, blank for any",
-        console=console,
-        yes=args.yes,
-    )
+    loader_filters = _get_loader_filters_for_selected_types(args, selected_types, console, yes=args.yes)
     channels = parse_csv(args.channels) or ["release"]
     run_log.add(
         "Version filters selected",
         minecraft_versions=minecraft_versions,
-        loaders=loaders,
+        mod_loaders=loader_filters.get("mod"),
+        shader_loaders=loader_filters.get("shader"),
+        plugin_loaders=loader_filters.get("plugin"),
+        skipped_loader_types=sorted(NO_LOADER_FILTER_TYPES.intersection(selected_types)),
         channels=channels,
     )
 
@@ -304,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
         projects=selected_projects,
         output_dir=output_dir,
         minecraft_versions=minecraft_versions,
-        loaders=loaders,
+        loader_filters=loader_filters,
         channels=channels,
         group_by_type=args.group_by_type,
         console=console,
@@ -369,6 +387,65 @@ def type_folder(project_type: str) -> str:
     return TYPE_FOLDERS.get(project_type, project_type)
 
 
+def loader_filter_for_project_type(project_type: str, loader_filters: dict[str, list[str]]) -> list[str]:
+    if project_type in MOD_LOADER_TYPES:
+        return loader_filters.get("mod", [])
+    if project_type in SHADER_LOADER_TYPES:
+        return loader_filters.get("shader", [])
+    if project_type in PLUGIN_LOADER_TYPES:
+        return loader_filters.get("plugin", [])
+    return []
+
+
+def _get_loader_filters_for_selected_types(
+    args: argparse.Namespace,
+    selected_types: set[str],
+    console: Console,
+    *,
+    yes: bool,
+) -> dict[str, list[str]]:
+    filters = {"mod": [], "shader": [], "plugin": []}
+
+    if selected_types.intersection(MOD_LOADER_TYPES):
+        filters["mod"] = _optional_list(
+            args.mod_loaders,
+            prompt="Mod/modpack loader filter, comma-separated, blank for any",
+            console=console,
+            yes=yes,
+        )
+    elif args.mod_loaders:
+        console.print("[yellow]Ignoring --loaders because no mods or modpacks are selected.[/]")
+
+    if selected_types.intersection(SHADER_LOADER_TYPES):
+        filters["shader"] = _optional_list(
+            args.shader_loaders,
+            prompt="Shader loader filter, comma-separated, blank for any",
+            console=console,
+            yes=yes,
+        )
+    elif args.shader_loaders:
+        console.print("[yellow]Ignoring --shader-loaders because no shaders are selected.[/]")
+
+    if selected_types.intersection(PLUGIN_LOADER_TYPES):
+        filters["plugin"] = _optional_list(
+            args.plugin_loaders,
+            prompt="Plugin platform filter, comma-separated, blank for any",
+            console=console,
+            yes=yes,
+        )
+    elif args.plugin_loaders:
+        console.print("[yellow]Ignoring --plugin-loaders because no plugins are selected.[/]")
+
+    skipped_types = sorted(NO_LOADER_FILTER_TYPES.intersection(selected_types))
+    if skipped_types:
+        console.print(
+            "[dim]Resource pack/datapack versions are not filtered by loader: "
+            f"{', '.join(skipped_types)}[/]"
+        )
+
+    return filters
+
+
 def _get_token_for_saving(args: argparse.Namespace, console: Console) -> str | None:
     raw_token = args.token
     if not raw_token:
@@ -429,14 +506,6 @@ def _select_types(
     if yes:
         return set(available)
 
-    table = Table(title="Available Item Types")
-    table.add_column("#", justify="right")
-    table.add_column("Type")
-    table.add_column("Projects", justify="right")
-    for index, project_type in enumerate(available, start=1):
-        table.add_row(str(index), project_type, str(type_counts[project_type]))
-    console.print(table)
-
     while True:
         raw = Prompt.ask("Select item types by number/name, or all", default="all")
         try:
@@ -478,13 +547,23 @@ def _get_output_dir(
         console.print("[red]Download folder cannot be blank.[/]")
 
 
+def _print_type_summary(console: Console, type_counts: Counter[str]) -> None:
+    table = Table(title="Collection Item Types")
+    table.add_column("#", justify="right")
+    table.add_column("Type")
+    table.add_column("Projects", justify="right")
+    for index, project_type in enumerate(sorted(type_counts), start=1):
+        table.add_row(str(index), project_type, str(type_counts[project_type]))
+    console.print(table)
+
+
 def _build_download_plan(
     *,
     client: ModrinthClient,
     projects: list[dict[str, Any]],
     output_dir: Path,
     minecraft_versions: list[str],
-    loaders: list[str],
+    loader_filters: dict[str, list[str]],
     channels: list[str],
     group_by_type: bool,
     console: Console,
@@ -508,10 +587,14 @@ def _build_download_plan(
                 project_type=project.get("project_type"),
             )
         try:
+            project_loaders = loader_filter_for_project_type(
+                project.get("project_type", "unknown"),
+                loader_filters,
+            )
             versions = client.list_project_versions(
                 project["id"],
                 minecraft_versions=minecraft_versions,
-                loaders=loaders,
+                loaders=project_loaders,
             )
         except ApiError as exc:
             skipped.append(SkippedProject(project, exc.message))
@@ -523,7 +606,7 @@ def _build_download_plan(
             versions,
             channels=channels,
             minecraft_versions=minecraft_versions,
-            loaders=loaders,
+            loaders=project_loaders,
         )
         if version is None:
             skipped.append(SkippedProject(project, "No matching listed version."))
