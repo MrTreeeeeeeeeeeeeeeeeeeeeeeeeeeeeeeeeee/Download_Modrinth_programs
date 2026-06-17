@@ -27,6 +27,8 @@ def test_save_and_load_config_with_folder_and_token(tmp_path):
         last_download_dir="C:/Downloads/Mods",
         modrinth_token="mrp_saved",
         last_download_inputs={
+            "start_action": "1",
+            "token_option": "4",
             "types": "mod,modpack",
             "minecraft_version": "1.21.1",
             "mod_loaders": "fabric",
@@ -50,6 +52,8 @@ def test_save_and_load_config_with_folder_and_token(tmp_path):
     assert loaded.last_download_dir == "C:/Downloads/Mods"
     assert loaded.modrinth_token == "mrp_saved"
     assert loaded.last_download_inputs == {
+        "start_action": "1",
+        "token_option": "4",
         "types": "mod,modpack",
         "minecraft_version": "1.21.1",
         "mod_loaders": "fabric",
@@ -75,6 +79,7 @@ def test_remember_download_choices_normalizes_supported_fields(tmp_path):
         config,
         {
             "types": "all",
+            "token_option": "4",
             "minecraft_version": "1.21.1",
             "unknown": "ignored",
         },
@@ -93,11 +98,24 @@ def test_remember_download_choices_normalizes_supported_fields(tmp_path):
     assert loaded.last_collection == "gRlE8phg"
     assert loaded.last_download_inputs == {
         "types": "all",
+        "token_option": "4",
         "minecraft_version": "1.21.1",
     }
     assert loaded.last_download_options == {
         "server_required": True,
         "type_subfolders": False,
+    }
+
+
+def test_remember_download_inputs_merges_with_existing_values():
+    config = AppConfig(last_download_inputs={"start_action": "1", "token_option": "4"})
+
+    remember_download_inputs(config, {"types": "modpack"})
+
+    assert config.last_download_inputs == {
+        "start_action": "1",
+        "token_option": "4",
+        "types": "modpack",
     }
 
 

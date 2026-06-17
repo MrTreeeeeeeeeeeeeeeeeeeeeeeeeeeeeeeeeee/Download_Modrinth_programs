@@ -38,7 +38,7 @@ from .download import (
     select_version_file,
 )
 from .modrinth import ApiError, ModrinthClient, parse_collection_id
-from .modpack_convert import convert_mrpack_to_zip
+from .modpack_convert import SERVER_REQUIRED_MARKER, convert_mrpack_to_zip
 from .run_log import RunLog, resolve_log_path
 
 
@@ -73,6 +73,7 @@ class PlannedDownload:
     file: dict[str, Any]
     destination: DestinationPlan
     convert_modpack_zip: bool = False
+    server_required_only: bool = False
 
 
 @dataclass
@@ -165,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         saved_token_present=bool(config.modrinth_token),
     )
 
-    action = _choose_start_action(console, yes=args.yes)
+    action = _choose_start_action(config, console, yes=args.yes)
     if action == "forget_token":
         forget_token(config)
         console.print("[yellow]Saved Modrinth token removed.[/]")
@@ -390,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         channels=channels,
         group_by_type=type_subfolders,
         modpack_zip=runtime_options.modpack_zip,
+        server_required=runtime_options.server_required,
         console=console,
         run_log=run_log,
     )
@@ -410,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = _download_planned(
         console,
         planned,
+        modrinth_client=client,
         strict_metadata=runtime_options.strict_metadata,
         run_log=run_log,
     )
@@ -430,10 +433,13 @@ def parse_csv(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def _choose_start_action(console: Console, *, yes: bool) -> str:
+def _choose_start_action(config: AppConfig, console: Console, *, yes: bool) -> str:
     if yes:
         return "download"
 
+    default = config.last_download_inputs.get("start_action", "1")
+    if default not in {"1", "2"}:
+        default = "1"
     table = Table(title="Start")
     table.add_column("#", justify="right")
     table.add_column("Action")
@@ -441,7 +447,10 @@ def _choose_start_action(console: Console, *, yes: bool) -> str:
     table.add_row("2", "Save or replace Modrinth token")
     table.add_row("3", "Forget saved Modrinth token")
     console.print(table)
-    choice = Prompt.ask("Choose an action", choices=["1", "2", "3"], default="1")
+    choice = Prompt.ask("Choose an action", choices=["1", "2", "3"], default=default)
+    if choice in {"1", "2"}:
+        remember_download_inputs(config, {"start_action": choice})
+        save_config(config)
     return {"1": "download", "2": "save_token", "3": "forget_token"}[choice]
 
 
@@ -472,6 +481,9 @@ def _get_download_token_selection(
     if yes:
         return TokenSelection()
 
+    default = config.last_download_inputs.get("token_option", "1")
+    if default not in {"1", "2", "3", "4"}:
+        default = "1"
     table = Table(title="Token")
     table.add_column("#", justify="right")
     table.add_column("Option")
@@ -480,7 +492,9 @@ def _get_download_token_selection(
     table.add_row("3", "Enter and save token")
     table.add_row("4", "Continue without a token")
     console.print(table)
-    choice = Prompt.ask("Choose token option", choices=["1", "2", "3", "4"], default="1")
+    choice = Prompt.ask("Choose token option", choices=["1", "2", "3", "4"], default=default)
+    remember_download_inputs(config, {"token_option": choice})
+    save_config(config)
 
     if choice == "1":
         return TokenSelection()
@@ -822,15 +836,23 @@ def modpack_zip_filename(
     file: dict[str, Any],
     project: dict[str, Any],
     version: dict[str, Any],
+    *,
+    server_required: bool = False,
 ) -> str:
     fallback = f"{project.get('slug') or project.get('id') or 'modpack'}-{version.get('version_number') or version.get('id') or 'version'}.mrpack"
     filename = sanitize_filename(str(file.get("filename") or fallback))
     path = Path(filename)
     if path.suffix.lower() == ".mrpack":
-        return f"{path.stem}.zip"
-    if path.suffix.lower() == ".zip":
-        return filename
-    return f"{filename}.zip"
+        zip_name = f"{path.stem}.zip"
+    elif path.suffix.lower() == ".zip":
+        zip_name = filename
+    else:
+        zip_name = f"{filename}.zip"
+
+    if server_required:
+        zip_path = Path(zip_name)
+        return f"{zip_path.stem}-server.zip"
+    return zip_name
 
 
 def resolve_modpack_zip_destination(
@@ -839,9 +861,16 @@ def resolve_modpack_zip_destination(
     *,
     project_slug: str | None,
     version_id: str | None,
+    server_required: bool = False,
 ) -> DestinationPlan:
     candidate = pack_dir / sanitize_filename(filename)
     if candidate.exists() and _is_valid_zip_file(candidate):
+        if server_required and not _has_zip_entry(candidate, SERVER_REQUIRED_MARKER):
+            return DestinationPlan(
+                candidate,
+                "replace",
+                "Existing server zip predates server-required metadata filtering.",
+            )
         return DestinationPlan(candidate, "already_exists", "Existing converted zip is valid.")
     return resolve_destination(
         pack_dir,
@@ -861,6 +890,14 @@ def _is_valid_zip_file(path: Path) -> bool:
         return False
 
 
+def _has_zip_entry(path: Path, entry_name: str) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return entry_name in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def _build_download_plan(
     *,
     client: ModrinthClient,
@@ -872,6 +909,7 @@ def _build_download_plan(
     group_by_type: bool,
     console: Console,
     modpack_zip: bool = False,
+    server_required: bool = False,
     run_log: RunLog | None = None,
 ) -> tuple[list[PlannedDownload], list[PlannedDownload], list[SkippedProject]]:
     planned: list[PlannedDownload] = []
@@ -931,11 +969,19 @@ def _build_download_plan(
             pack_dir = output_dir / "modpack" / modpack_folder_name(project)
             destination = resolve_modpack_zip_destination(
                 pack_dir,
-                modpack_zip_filename(file, project, version),
+                modpack_zip_filename(file, project, version, server_required=server_required),
                 project_slug=project.get("slug"),
                 version_id=version.get("id"),
+                server_required=server_required,
             )
-            item = PlannedDownload(project, version, file, destination, convert_modpack_zip=True)
+            item = PlannedDownload(
+                project,
+                version,
+                file,
+                destination,
+                convert_modpack_zip=True,
+                server_required_only=server_required,
+            )
         else:
             target_dir = output_dir
             if group_by_type:
@@ -961,6 +1007,7 @@ def _build_download_plan(
                     destination=destination.path,
                     reason=destination.reason,
                     converted_modpack=item.convert_modpack_zip,
+                    server_required_only=item.server_required_only,
                 )
         else:
             planned.append(item)
@@ -975,6 +1022,7 @@ def _build_download_plan(
                     size=file.get("size"),
                     pack_folder=destination.path.parent if item.convert_modpack_zip else "(none)",
                     converted_modpack=item.convert_modpack_zip,
+                    server_required_only=item.server_required_only,
                 )
 
     return planned, already_existing, skipped
@@ -1029,6 +1077,7 @@ def _download_planned(
     console: Console,
     planned: list[PlannedDownload],
     *,
+    modrinth_client: ModrinthClient | None = None,
     strict_metadata: bool = False,
     run_log: RunLog | None = None,
 ) -> list[tuple[PlannedDownload, str]]:
@@ -1060,6 +1109,7 @@ def _download_planned(
                     source_filename=filename,
                     index=index,
                     total=total,
+                    modrinth_client=modrinth_client,
                     strict_metadata=strict_metadata,
                     run_log=run_log,
                 )
@@ -1142,6 +1192,7 @@ def _download_converted_modpack(
     source_filename: str,
     index: int,
     total: int,
+    modrinth_client: ModrinthClient | None,
     strict_metadata: bool,
     run_log: RunLog | None,
 ) -> str | None:
@@ -1194,7 +1245,9 @@ def _download_converted_modpack(
             result = convert_mrpack_to_zip(
                 source_path,
                 item.destination.path,
+                project_metadata_resolver=modrinth_client.get_projects if modrinth_client else None,
                 strict_metadata=strict_metadata,
+                server_required_only=item.server_required_only,
                 progress_callback=lambda message: progress.console.print(f"[dim]  {message}[/]"),
                 run_log=run_log,
             )

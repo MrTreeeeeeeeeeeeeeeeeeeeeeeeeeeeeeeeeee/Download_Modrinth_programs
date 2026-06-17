@@ -76,7 +76,7 @@ output-folder/
       Pack Name Version.zip
 ```
 
-The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
+The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. In server-required mode, converted modpack zips use a `-server.zip` filename, look up each referenced Modrinth project, include files whose project server-side environment is `required`, and copy `overrides/` plus `server-overrides/` instead of client overrides. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
 
 Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
 
@@ -94,7 +94,7 @@ Downloads are retried when verification fails. If Modrinth's recorded size or ha
 
 ## Saved Choices
 
-The app saves the collection, download folder, selected item types, version filters, loader filters, channel selection, log-file choice, and download options after each run setup. The next interactive run uses those saved values as prompt defaults, and `--yes` uses the saved values without prompting.
+The app saves the collection, start/token prompt choices, download folder, selected item types, version filters, loader filters, channel selection, log-file choice, and download options after each run setup. The next interactive run uses those saved values as prompt defaults, and `--yes` uses the saved values without prompting.
 
 ## Personal Access Tokens
 

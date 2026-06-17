@@ -17,6 +17,8 @@ DEFAULT_DOWNLOAD_OPTIONS = {
     "dry_run": False,
 }
 DOWNLOAD_INPUT_KEYS = {
+    "start_action",
+    "token_option",
     "types",
     "minecraft_version",
     "mod_loaders",
@@ -115,7 +117,9 @@ def remember_collection(config: AppConfig, collection: str) -> None:
 
 
 def remember_download_inputs(config: AppConfig, inputs: Mapping[str, str]) -> None:
-    config.last_download_inputs = _normalize_download_inputs(inputs)
+    merged = dict(config.last_download_inputs)
+    merged.update(_normalize_download_inputs(inputs))
+    config.last_download_inputs = _normalize_download_inputs(merged)
 
 
 def remember_download_options(config: AppConfig, options: Mapping[str, bool]) -> None:
