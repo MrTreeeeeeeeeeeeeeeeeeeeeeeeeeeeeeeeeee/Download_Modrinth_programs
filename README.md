@@ -30,6 +30,18 @@ Non-interactive dry run with release-only versions:
 python -m modrinth_collection_downloader gRlE8phg -o "C:\Minecraft\mods" --types mod --minecraft-version 1.21.1 --loaders fabric --channels release --dry-run --yes
 ```
 
+Download mods and modpacks from the same collection:
+
+```powershell
+python -m modrinth_collection_downloader gRlE8phg -o "C:\Minecraft" --types mods,modpacks --minecraft-version 1.21.1 --loaders fabric --channels release --yes
+```
+
+Download only mods that are required on the server:
+
+```powershell
+python -m modrinth_collection_downloader gRlE8phg -o "C:\Minecraft\mods" --server-required --minecraft-version 1.21.1 --loaders fabric --channels release --yes
+```
+
 The app fetches the collection before asking filter questions, then shows the item types and counts in the collection. Loader prompts are only shown for selected item types that use them:
 
 - Mods and modpacks use the mod loader prompt or `--loaders` / `--mod-loaders`.
@@ -40,6 +52,8 @@ The app fetches the collection before asking filter questions, then shows the it
 Interactive runs also ask which version channels to use. The default is `release,beta` because some common collection items, including resource packs, publish compatible versions as beta. Enter `all` or pass `--channels all` to include `release,beta,alpha`. Pass `--channels release` when you want release-only downloads.
 
 Minecraft version matching handles versions that list several compatible game versions, and also treats minor-series entries like `1.20` or `1.20.x` as compatible with patch versions such as `1.20.1`.
+
+Use `--server-required` to download only Modrinth projects whose type is `mod` and whose server-side environment is `required`. This includes server-only mods and mods required on both client and server, and excludes client-only mods plus mods that are only optional on the server. `--server-mods` is accepted as an alias.
 
 By default, every downloaded file is placed in a subfolder named for its Modrinth project type:
 
@@ -119,12 +133,13 @@ The app masks tokens in terminal output, but the config file itself contains the
 
 - `collection`: Modrinth collection URL or ID.
 - `-o, --output PATH`: folder to download into.
-- `--types mod,shader,...`: selected project types.
+- `--types mod,modpack,shader,...`: selected project types. Common plural aliases like `mods`, `modpacks`, `resource-packs`, and `shaders` are accepted.
 - `--minecraft-version VERSION`: optional Minecraft version filter.
 - `--loaders fabric,forge,neoforge,quilt`: optional mod/modpack loader filter. `--mod-loaders` is also accepted.
 - `--shader-loaders iris,optifine,canvas,vanilla`: optional shader loader filter.
 - `--plugin-loaders paper,spigot,purpur,folia,velocity`: optional plugin platform filter.
 - `--channels release,beta,alpha`: version channels; default is `release,beta`. `all` expands to `release,beta,alpha`.
+- `--server-required`: download only mods whose Modrinth server-side environment is `required`. `--server-mods` is also accepted.
 - `--token TOKEN`: token for this run.
 - `--save-token`: save the provided or prompted token.
 - `--set-token`: prompt for, validate, and save a token.

@@ -8,6 +8,8 @@ from modrinth_collection_downloader.cli import (
     _download_planned,
     _get_channels,
     build_parser,
+    filter_server_required_mods,
+    is_server_required_mod,
     loader_filter_for_project_type,
     modpack_folder_name,
     modpack_zip_filename,
@@ -26,11 +28,13 @@ def test_parse_csv_trims_and_skips_empty_values():
 
 
 def test_parse_type_selection_accepts_all_numbers_and_names():
-    available = ["mod", "resourcepack", "shader"]
+    available = ["mod", "modpack", "resourcepack", "shader"]
 
     assert parse_type_selection("all", available) == set(available)
-    assert parse_type_selection("1,3", available) == {"mod", "shader"}
+    assert parse_type_selection("1,4", available) == {"mod", "shader"}
     assert parse_type_selection("mod,shader", available) == {"mod", "shader"}
+    assert parse_type_selection("mods,modpacks", available) == {"mod", "modpack"}
+    assert parse_type_selection("resource-packs,shaders", available) == {"resourcepack", "shader"}
 
 
 def test_parse_type_selection_rejects_invalid_values():
@@ -77,6 +81,54 @@ def test_parser_supports_modpack_zip():
     assert args.modpack_zip is True
 
 
+def test_parser_supports_server_required_mods_filter():
+    args = build_parser().parse_args(["abc123", "--server-required"])
+
+    assert args.server_required is True
+
+
+def test_server_required_mod_filter_keeps_only_required_server_mods():
+    server_only = {
+        "id": "server-only",
+        "project_type": "mod",
+        "client_side": "unsupported",
+        "server_side": "required",
+    }
+    client_and_server = {
+        "id": "client-and-server",
+        "project_type": "mod",
+        "client_side": "required",
+        "server_side": "required",
+    }
+    client_only = {
+        "id": "client-only",
+        "project_type": "mod",
+        "client_side": "required",
+        "server_side": "unsupported",
+    }
+    optional_server = {
+        "id": "optional-server",
+        "project_type": "mod",
+        "client_side": "required",
+        "server_side": "optional",
+    }
+    plugin = {
+        "id": "plugin",
+        "project_type": "plugin",
+        "client_side": "unsupported",
+        "server_side": "required",
+    }
+
+    assert is_server_required_mod(server_only) is True
+    assert is_server_required_mod(client_and_server) is True
+    assert is_server_required_mod(client_only) is False
+    assert is_server_required_mod(optional_server) is False
+    assert is_server_required_mod(plugin) is False
+    assert filter_server_required_mods(
+        [server_only, client_and_server, client_only, optional_server, plugin]
+    ) == [server_only, client_and_server]
+
+
 def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
     console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
 
@@ -98,6 +150,7 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
 
         def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
             self.calls.append((project_id, list(loaders or [])))
+            filename = f"{project_id}.mrpack" if project_id == "modpack-id" else f"{project_id}.jar"
             return [
                 {
                     "id": f"{project_id}-version",
@@ -109,8 +162,8 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
                     "version_number": "1.0.0",
                     "files": [
                         {
-                            "filename": f"{project_id}.jar",
-                            "url": f"https://example.test/{project_id}.jar",
+                            "filename": filename,
+                            "url": f"https://example.test/{filename}",
                             "hashes": {},
                             "primary": True,
                             "size": 1,
@@ -123,6 +176,7 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
     def _version_loaders(project_id):
         return {
             "mod-id": ["fabric"],
+            "modpack-id": ["fabric"],
             "resourcepack-id": ["minecraft"],
             "datapack-id": ["datapack"],
             "shader-id": ["iris"],
@@ -131,6 +185,7 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
 
     projects = [
         {"id": "mod-id", "slug": "mod-slug", "title": "Mod", "project_type": "mod"},
+        {"id": "modpack-id", "slug": "modpack-slug", "title": "Modpack", "project_type": "modpack"},
         {
             "id": "resourcepack-id",
             "slug": "resourcepack-slug",
@@ -158,12 +213,14 @@ def test_build_download_plan_routes_loader_filters_by_project_type(tmp_path):
 
     assert [(project_id, loaders) for project_id, loaders in client.calls] == [
         ("mod-id", ["fabric"]),
+        ("modpack-id", ["fabric"]),
         ("resourcepack-id", []),
         ("datapack-id", []),
         ("shader-id", ["iris"]),
         ("plugin-id", ["paper"]),
     ]
-    assert len(planned) == 5
+    assert len(planned) == 6
+    assert tmp_path / "modpack-id.mrpack" in [item.destination.path for item in planned]
     assert already_existing == []
     assert skipped == []
 

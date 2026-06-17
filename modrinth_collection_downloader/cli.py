@@ -43,6 +43,21 @@ PLUGIN_LOADER_TYPES = {"plugin"}
 NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
 ALL_CHANNELS = ["release", "beta", "alpha"]
 DEFAULT_CHANNELS = ["release", "beta"]
+SERVER_REQUIRED_SIDE = "required"
+TYPE_ALIASES = {
+    "mods": "mod",
+    "modpacks": "modpack",
+    "resourcepacks": "resourcepack",
+    "resource-packs": "resourcepack",
+    "resource_pack": "resourcepack",
+    "resource_packs": "resourcepack",
+    "datapacks": "datapack",
+    "data-packs": "datapack",
+    "data_pack": "datapack",
+    "data_packs": "datapack",
+    "shaders": "shader",
+    "plugins": "plugin",
+}
 
 
 @dataclass
@@ -86,6 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--channels",
         help="Comma-separated release channels, or all. Default: release,beta.",
+    )
+    parser.add_argument(
+        "--server-required",
+        "--server-mods",
+        action="store_true",
+        help=(
+            "Download only mods that are required on the server. "
+            "Includes server-only and client/server mods; excludes client-only mods."
+        ),
     )
     parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
     parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
@@ -137,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         shader_loaders=args.shader_loaders or "(any)",
         plugin_loaders=args.plugin_loaders or "(any)",
         channels=args.channels or f"(prompt/default {','.join(DEFAULT_CHANNELS)})",
+        server_required=args.server_required,
         dry_run=args.dry_run,
         modpack_zip=args.modpack_zip,
         strict_metadata=args.strict_metadata,
@@ -310,6 +335,24 @@ def main(argv: list[str] | None = None) -> int:
     selected_projects = [
         project for project in ordered_projects if project.get("project_type", "unknown") in selected_types
     ]
+    if args.server_required:
+        before_count = len(selected_projects)
+        selected_projects = filter_server_required_mods(selected_projects)
+        removed_count = before_count - len(selected_projects)
+        console.print(
+            "[dim]Server-required mode: "
+            f"{len(selected_projects)} required server mod(s) selected; {removed_count} item(s) excluded.[/]"
+        )
+        run_log.add(
+            "Server-required mod filter applied",
+            before=before_count,
+            after=len(selected_projects),
+            excluded=removed_count,
+        )
+        if not selected_projects:
+            console.print("[yellow]No server-required mods matched the selected filters.[/]")
+            run_log.add("No server-required mods selected")
+            return finish(0)
 
     minecraft_versions = _optional_list(
         args.minecraft_version,
@@ -411,7 +454,12 @@ def parse_type_selection(value: str, available_types: Iterable[str]) -> set[str]
             selected.add(available[index])
             continue
 
-        match = available_lookup.get(item.lower())
+        requested = item.lower()
+        match = available_lookup.get(requested)
+        if not match:
+            alias = TYPE_ALIASES.get(requested)
+            if alias:
+                match = available_lookup.get(alias)
         if not match:
             raise ValueError(f"Unknown type: {item}")
         selected.add(match)
@@ -430,6 +478,17 @@ def loader_filter_for_project_type(project_type: str, loader_filters: dict[str, 
     if project_type in PLUGIN_LOADER_TYPES:
         return loader_filters.get("plugin", [])
     return []
+
+
+def is_server_required_mod(project: dict[str, Any]) -> bool:
+    return (
+        project.get("project_type") == "mod"
+        and str(project.get("server_side", "")).lower() == SERVER_REQUIRED_SIDE
+    )
+
+
+def filter_server_required_mods(projects: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [project for project in projects if is_server_required_mod(project)]
 
 
 def _get_loader_filters_for_selected_types(
