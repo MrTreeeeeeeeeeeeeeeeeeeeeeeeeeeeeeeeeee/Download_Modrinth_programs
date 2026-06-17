@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import sys
 import tempfile
 import zipfile
 from collections import Counter
@@ -17,10 +18,14 @@ from rich.table import Table
 from .auth import mask_token, normalize_token, resolve_token
 from .config import (
     AppConfig,
+    DEFAULT_DOWNLOAD_OPTIONS,
     forget_token,
     get_config_path,
     load_config,
+    remember_collection,
     remember_download_dir,
+    remember_download_inputs,
+    remember_download_options,
     save_config,
     set_token,
 )
@@ -41,6 +46,7 @@ MOD_LOADER_TYPES = {"mod", "modpack"}
 SHADER_LOADER_TYPES = {"shader"}
 PLUGIN_LOADER_TYPES = {"plugin"}
 NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
+SERVER_REQUIRED_TYPES = {"mod", "modpack"}
 ALL_CHANNELS = ["release", "beta", "alpha"]
 DEFAULT_CHANNELS = ["release", "beta"]
 SERVER_REQUIRED_SIDE = "required"
@@ -75,110 +81,61 @@ class SkippedProject:
     reason: str
 
 
+@dataclass
+class RuntimeOptions:
+    server_required: bool
+    type_subfolders: bool
+    modpack_zip: bool
+    strict_metadata: bool
+    dry_run: bool
+
+    def to_config(self) -> dict[str, bool]:
+        return {
+            "server_required": self.server_required,
+            "type_subfolders": self.type_subfolders,
+            "modpack_zip": self.modpack_zip,
+            "strict_metadata": self.strict_metadata,
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class TokenSelection:
+    token: str | None = None
+    no_token: bool = False
+    config_changed: bool = False
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="modrinth-collection-downloader",
         description="Download selected project types from a Modrinth collection.",
     )
     parser.add_argument("collection", nargs="?", help="Modrinth collection URL or collection ID.")
-    parser.add_argument("-o", "--output", help="Folder to download into.")
-    parser.add_argument("--types", help="Comma-separated project types to download.")
-    parser.add_argument("--minecraft-version", help="Optional Minecraft version filter.")
-    parser.add_argument(
-        "--loaders",
-        "--mod-loaders",
-        dest="mod_loaders",
-        help="Comma-separated mod/modpack loader filter, for example fabric,forge,neoforge,quilt.",
-    )
-    parser.add_argument(
-        "--shader-loaders",
-        help="Comma-separated shader loader filter, for example iris,optifine,canvas,vanilla.",
-    )
-    parser.add_argument(
-        "--plugin-loaders",
-        help="Comma-separated plugin platform filter, for example paper,spigot,purpur,folia,velocity.",
-    )
-    parser.add_argument(
-        "--channels",
-        help="Comma-separated release channels, or all. Default: release,beta.",
-    )
-    parser.add_argument(
-        "--server-required",
-        "--server-mods",
-        action="store_true",
-        help=(
-            "Download only mods that are required on the server. "
-            "Includes server-only and client/server mods; excludes client-only mods."
-        ),
-    )
-    parser.add_argument("--token", help="Modrinth Personal Access Token for this run.")
-    parser.add_argument("--save-token", action="store_true", help="Save the provided or prompted token.")
-    parser.add_argument("--set-token", action="store_true", help="Prompt for, validate, and save a token.")
-    parser.add_argument("--forget-token", action="store_true", help="Remove the saved token.")
-    parser.add_argument("--no-token", action="store_true", help="Ignore saved and environment tokens.")
-    folder_group = parser.add_mutually_exclusive_group()
-    folder_group.add_argument(
-        "--group-by-type",
-        action="store_true",
-        help="Deprecated; type subfolders are now used by default.",
-    )
-    folder_group.add_argument(
-        "--flat",
-        action="store_true",
-        help="Download all files directly into the output folder instead of type subfolders.",
-    )
-    parser.add_argument("--log-file", help="Log file path, or a folder for the default log filename.")
-    parser.add_argument(
-        "--modpack-zip",
-        action="store_true",
-        help="Convert modpack .mrpack files into full .zip archives.",
-    )
-    parser.add_argument(
-        "--strict-metadata",
-        action="store_true",
-        help="Fail when downloaded file size or hashes differ from Modrinth metadata.",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Show planned downloads only.")
-    parser.add_argument("--yes", action="store_true", help="Use defaults and do not prompt.")
+    parser.add_argument("--yes", action="store_true", help="Use saved/default options and do not prompt.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else argv
+    args = build_parser().parse_args(raw_argv)
     console = Console()
     run_log = RunLog()
     config_path = get_config_path()
     selected_output_dir: Path | None = None
-    type_subfolders = args.group_by_type or not args.flat
+    selected_log_file: str | None = None
 
     run_log.add(
         "Run started",
-        collection=args.collection or "(prompt)",
-        output=args.output or "(prompt)",
-        types=args.types or "(prompt/all)",
-        minecraft_version=args.minecraft_version or "(any)",
-        mod_loaders=args.mod_loaders or "(any)",
-        shader_loaders=args.shader_loaders or "(any)",
-        plugin_loaders=args.plugin_loaders or "(any)",
-        channels=args.channels or f"(prompt/default {','.join(DEFAULT_CHANNELS)})",
-        server_required=args.server_required,
-        dry_run=args.dry_run,
-        modpack_zip=args.modpack_zip,
-        strict_metadata=args.strict_metadata,
-        type_subfolders=type_subfolders,
-        flat=args.flat,
-        token_argument_provided=bool(args.token),
-        save_token=args.save_token,
-        set_token=args.set_token,
-        forget_token=args.forget_token,
-        no_token=args.no_token,
+        collection=args.collection or "(prompt/saved)",
+        yes=args.yes,
         config_path=config_path,
     )
 
     def finish(exit_code: int) -> int:
         run_log.add("Run finished", exit_code=exit_code)
         log_path = resolve_log_path(
-            requested_log_file=args.log_file,
+            requested_log_file=selected_log_file,
             output_dir=selected_output_dir,
             config_path=config_path,
             run_log=run_log,
@@ -201,24 +158,24 @@ def main(argv: list[str] | None = None) -> int:
 
     run_log.add(
         "Config loaded",
+        last_collection=config.last_collection or "(none)",
         last_download_dir=config.last_download_dir or "(none)",
+        last_download_inputs=config.last_download_inputs or "(none)",
+        last_download_options=config.last_download_options or "(none)",
         saved_token_present=bool(config.modrinth_token),
     )
 
-    config_changed = False
-
-    if args.forget_token:
+    action = _choose_start_action(console, yes=args.yes)
+    if action == "forget_token":
         forget_token(config)
-        config_changed = True
         console.print("[yellow]Saved Modrinth token removed.[/]")
         run_log.add("Saved token removed")
-        if not args.collection and not args.set_token and not args.save_token:
-            save_config(config)
-            run_log.add("Config saved", reason="forget_token")
-            return finish(0)
+        save_config(config)
+        run_log.add("Config saved", reason="forget_token")
+        return finish(0)
 
-    if args.set_token:
-        token = _get_token_for_saving(args, console)
+    if action == "save_token":
+        token = _get_token_for_saving(console)
         if not token:
             run_log.add("Token prompt returned no usable token")
             return finish(2)
@@ -228,46 +185,30 @@ def main(argv: list[str] | None = None) -> int:
         if not _save_token_with_warning(config, token, console, yes=args.yes):
             run_log.add("Token save declined")
             return finish(1)
-        config_changed = True
         run_log.add("Token validated and saved", token=mask_token(token))
-        if not args.collection:
-            save_config(config)
-            run_log.add("Config saved", reason="set_token")
-            return finish(0)
+        save_config(config)
+        run_log.add("Config saved", reason="save_token")
+        return finish(0)
 
-    if args.save_token and not args.set_token:
-        token = _get_token_for_saving(args, console)
-        if not token:
-            run_log.add("Token prompt returned no usable token")
-            return finish(2)
-        if not _save_token_with_warning(config, token, console, yes=args.yes):
-            run_log.add("Token save declined")
-            return finish(1)
-        config_changed = True
-        run_log.add("Token saved", token=mask_token(token))
-        if not args.collection:
-            save_config(config)
-            run_log.add("Config saved", reason="save_token")
-            return finish(0)
+    token_selection = _get_download_token_selection(config, console, yes=args.yes)
+    if token_selection is None:
+        run_log.add("Token selection failed")
+        return finish(2)
+    if token_selection.config_changed:
+        save_config(config)
+        run_log.add("Config saved", reason="download token selection")
 
     resolved_token = resolve_token(
-        cli_token=args.token,
+        cli_token=token_selection.token,
         saved_token=config.modrinth_token,
-        no_token=args.no_token,
+        no_token=token_selection.no_token,
     )
 
-    if config_changed:
-        save_config(config)
-        run_log.add("Config saved", reason="token changes")
-
-    collection_input = args.collection
+    collection_input = _get_collection_input(args.collection, config, console, yes=args.yes)
     if not collection_input:
-        if args.yes:
-            console.print("[red]A collection URL or ID is required when --yes is used.[/]")
-            run_log.add("Missing collection in non-interactive mode")
-            return finish(2)
-        collection_input = Prompt.ask("[cyan]Modrinth collection URL or ID[/]")
-        run_log.add("Collection entered interactively", collection=collection_input)
+        console.print("[red]A collection URL or ID is required when --yes is used and no saved collection exists.[/]")
+        run_log.add("Missing collection in non-interactive mode")
+        return finish(2)
 
     try:
         collection_id = parse_collection_id(collection_input)
@@ -276,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
         run_log.add("Collection parse failed", input=collection_input, error=exc)
         return finish(2)
     run_log.add("Collection parsed", collection_id=collection_id)
+    remember_collection(config, collection_input)
+    save_config(config)
+    run_log.add("Config saved", reason="collection")
 
     client = ModrinthClient(token=resolved_token.token)
     if resolved_token.token:
@@ -320,48 +264,78 @@ def main(argv: list[str] | None = None) -> int:
     type_counts = Counter(project.get("project_type", "unknown") for project in ordered_projects)
     run_log.add("Project metadata fetched", returned_project_count=len(ordered_projects), type_counts=dict(type_counts))
     _print_type_summary(console, type_counts)
-    try:
-        selected_types = _select_types(args.types, type_counts, console, yes=args.yes)
-    except ValueError as exc:
-        console.print(f"[red]Invalid --types value:[/] {exc}")
-        run_log.add("Type selection failed", error=exc)
-        return finish(2)
+    selected_types = _select_types(
+        type_counts,
+        console,
+        yes=args.yes,
+        saved_default=config.last_download_inputs.get("types"),
+    )
     if not selected_types:
         console.print("[yellow]No item types selected.[/]")
         run_log.add("No item types selected")
         return finish(0)
     run_log.add("Item types selected", selected_types=sorted(selected_types))
 
+    runtime_options = _resolve_runtime_options(
+        selected_types,
+        console,
+        yes=args.yes,
+        saved_options=config.last_download_options,
+    )
+    type_subfolders = runtime_options.type_subfolders
+    remember_download_options(config, runtime_options.to_config())
+    save_config(config)
+    run_log.add("Config saved", reason="download options")
+    run_log.add(
+        "Download options selected",
+        server_required=runtime_options.server_required,
+        dry_run=runtime_options.dry_run,
+        modpack_zip=runtime_options.modpack_zip,
+        strict_metadata=runtime_options.strict_metadata,
+        type_subfolders=runtime_options.type_subfolders,
+        flat=not runtime_options.type_subfolders,
+    )
+
     selected_projects = [
         project for project in ordered_projects if project.get("project_type", "unknown") in selected_types
     ]
-    if args.server_required:
+    if runtime_options.server_required:
         before_count = len(selected_projects)
-        selected_projects = filter_server_required_mods(selected_projects)
+        selected_projects = filter_server_required_projects(selected_projects)
         removed_count = before_count - len(selected_projects)
         console.print(
             "[dim]Server-required mode: "
-            f"{len(selected_projects)} required server mod(s) selected; {removed_count} item(s) excluded.[/]"
+            f"{len(selected_projects)} server-required mod/modpack item(s) selected; "
+            f"{removed_count} item(s) excluded.[/]"
         )
         run_log.add(
-            "Server-required mod filter applied",
+            "Server-required project filter applied",
             before=before_count,
             after=len(selected_projects),
             excluded=removed_count,
         )
         if not selected_projects:
-            console.print("[yellow]No server-required mods matched the selected filters.[/]")
-            run_log.add("No server-required mods selected")
+            console.print("[yellow]No server-required mods or modpacks matched the selected filters.[/]")
+            run_log.add("No server-required projects selected")
             return finish(0)
 
     minecraft_versions = _optional_list(
-        args.minecraft_version,
         prompt="Minecraft version filter, blank for any",
         console=console,
         yes=args.yes,
+        saved_default=config.last_download_inputs.get("minecraft_version", ""),
     )
-    loader_filters = _get_loader_filters_for_selected_types(args, selected_types, console, yes=args.yes)
-    channels = _get_channels(args.channels, console, yes=args.yes)
+    loader_filters = _get_loader_filters_for_selected_types(
+        selected_types,
+        console,
+        yes=args.yes,
+        saved_inputs=config.last_download_inputs,
+    )
+    channels = _get_channels(
+        console,
+        yes=args.yes,
+        saved_default=config.last_download_inputs.get("channels"),
+    )
     run_log.add(
         "Version filters selected",
         minecraft_versions=minecraft_versions,
@@ -372,20 +346,38 @@ def main(argv: list[str] | None = None) -> int:
         channels=channels,
     )
 
-    output_dir = _get_output_dir(args.output, config, console, yes=args.yes)
+    output_dir = _get_output_dir(config, console, yes=args.yes)
     if output_dir is None:
         run_log.add("Output folder selection failed")
         return finish(2)
     selected_output_dir = output_dir
+    selected_log_file = _get_log_file(config, console, yes=args.yes)
     remember_download_dir(config, output_dir)
+    remember_download_inputs(
+        config,
+        {
+            "types": _format_type_selection(selected_types, type_counts),
+            "minecraft_version": ",".join(minecraft_versions),
+            "mod_loaders": ",".join(loader_filters.get("mod", [])),
+            "shader_loaders": ",".join(loader_filters.get("shader", [])),
+            "plugin_loaders": ",".join(loader_filters.get("plugin", [])),
+            "channels": ",".join(channels),
+            "log_file": selected_log_file or "",
+        },
+    )
     save_config(config)
-    run_log.add("Download folder selected and saved", output_dir=output_dir, type_subfolders=type_subfolders)
+    run_log.add(
+        "Download inputs selected and saved",
+        output_dir=output_dir,
+        log_file=selected_log_file or "(automatic)",
+        type_subfolders=type_subfolders,
+    )
     if type_subfolders:
         console.print("[dim]Files will be placed in type subfolders such as mod, modpack, and resourcepack.[/]")
     else:
         console.print("[dim]Flat mode enabled: files will be placed directly in the output folder.[/]")
 
-    if not args.dry_run:
+    if not runtime_options.dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
         run_log.add("Download folder ensured", output_dir=output_dir)
 
@@ -397,20 +389,20 @@ def main(argv: list[str] | None = None) -> int:
         loader_filters=loader_filters,
         channels=channels,
         group_by_type=type_subfolders,
-        modpack_zip=args.modpack_zip,
+        modpack_zip=runtime_options.modpack_zip,
         console=console,
         run_log=run_log,
     )
 
-    _print_plan(console, planned, already_existing, skipped, dry_run=args.dry_run)
+    _print_plan(console, planned, already_existing, skipped, dry_run=runtime_options.dry_run)
     run_log.add(
         "Download plan built",
         planned=len(planned),
         already_existing=len(already_existing),
         skipped=len(skipped),
-        dry_run=args.dry_run,
+        dry_run=runtime_options.dry_run,
     )
-    if args.dry_run:
+    if runtime_options.dry_run:
         console.print("[yellow]Dry run: no files downloaded.[/]")
         run_log.add("Dry run complete; no files downloaded")
         return finish(0)
@@ -418,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = _download_planned(
         console,
         planned,
-        strict_metadata=args.strict_metadata,
+        strict_metadata=runtime_options.strict_metadata,
         run_log=run_log,
     )
     _print_summary(console, planned, already_existing, skipped, failures)
@@ -436,6 +428,76 @@ def parse_csv(value: str | None) -> list[str]:
     if value is None:
         return []
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _choose_start_action(console: Console, *, yes: bool) -> str:
+    if yes:
+        return "download"
+
+    table = Table(title="Start")
+    table.add_column("#", justify="right")
+    table.add_column("Action")
+    table.add_row("1", "Download a collection")
+    table.add_row("2", "Save or replace Modrinth token")
+    table.add_row("3", "Forget saved Modrinth token")
+    console.print(table)
+    choice = Prompt.ask("Choose an action", choices=["1", "2", "3"], default="1")
+    return {"1": "download", "2": "save_token", "3": "forget_token"}[choice]
+
+
+def _get_collection_input(
+    requested_collection: str | None,
+    config: AppConfig,
+    console: Console,
+    *,
+    yes: bool,
+) -> str | None:
+    if requested_collection:
+        return requested_collection
+    if yes:
+        return config.last_collection
+    while True:
+        raw = Prompt.ask("[cyan]Modrinth collection URL or ID[/]", default=config.last_collection or "")
+        if raw.strip():
+            return raw
+        console.print("[red]Collection cannot be blank.[/]")
+
+
+def _get_download_token_selection(
+    config: AppConfig,
+    console: Console,
+    *,
+    yes: bool,
+) -> TokenSelection | None:
+    if yes:
+        return TokenSelection()
+
+    table = Table(title="Token")
+    table.add_column("#", justify="right")
+    table.add_column("Option")
+    table.add_row("1", "Use saved or environment token")
+    table.add_row("2", "Enter token for this run")
+    table.add_row("3", "Enter and save token")
+    table.add_row("4", "Continue without a token")
+    console.print(table)
+    choice = Prompt.ask("Choose token option", choices=["1", "2", "3", "4"], default="1")
+
+    if choice == "1":
+        return TokenSelection()
+    if choice == "4":
+        return TokenSelection(no_token=True)
+
+    token = _get_token_for_saving(console)
+    if not token:
+        return None
+    if choice == "2":
+        return TokenSelection(token=token)
+
+    if not _validate_and_report_token(token, console):
+        return None
+    if not _save_token_with_warning(config, token, console, yes=yes):
+        return None
+    return TokenSelection(token=token, config_changed=True)
 
 
 def parse_type_selection(value: str, available_types: Iterable[str]) -> set[str]:
@@ -480,55 +542,111 @@ def loader_filter_for_project_type(project_type: str, loader_filters: dict[str, 
     return []
 
 
-def is_server_required_mod(project: dict[str, Any]) -> bool:
+def is_server_required_project(project: dict[str, Any]) -> bool:
     return (
-        project.get("project_type") == "mod"
+        project.get("project_type") in SERVER_REQUIRED_TYPES
         and str(project.get("server_side", "")).lower() == SERVER_REQUIRED_SIDE
     )
 
 
-def filter_server_required_mods(projects: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [project for project in projects if is_server_required_mod(project)]
+def filter_server_required_projects(projects: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [project for project in projects if is_server_required_project(project)]
 
 
-def _get_loader_filters_for_selected_types(
-    args: argparse.Namespace,
+def _resolve_runtime_options(
     selected_types: set[str],
     console: Console,
     *,
     yes: bool,
+    saved_options: dict[str, bool] | None = None,
+) -> RuntimeOptions:
+    server_required = _saved_download_option(saved_options, "server_required")
+    type_subfolders = _saved_download_option(saved_options, "type_subfolders")
+    modpack_zip = _saved_download_option(saved_options, "modpack_zip")
+    strict_metadata = _saved_download_option(saved_options, "strict_metadata")
+    dry_run = _saved_download_option(saved_options, "dry_run")
+
+    if yes:
+        return RuntimeOptions(
+            server_required=server_required,
+            type_subfolders=type_subfolders,
+            modpack_zip=modpack_zip,
+            strict_metadata=strict_metadata,
+            dry_run=dry_run,
+        )
+
+    prompted = False
+
+    def ask(prompt: str, *, default: bool = False) -> bool:
+        nonlocal prompted
+        if not prompted:
+            console.print("[cyan]Download options[/]")
+            prompted = True
+        return Confirm.ask(prompt, default=default)
+
+    if selected_types.intersection(SERVER_REQUIRED_TYPES):
+        server_required = ask("Only download server-required mods and modpacks?", default=server_required)
+
+    if "modpack" in selected_types:
+        modpack_zip = ask("Convert modpack .mrpack files into full .zip archives?", default=modpack_zip)
+
+    type_subfolders = ask("Organize downloads into project-type folders?", default=type_subfolders)
+
+    dry_run = ask("Show the download plan only?", default=dry_run)
+
+    if not dry_run:
+        strict_metadata = ask("Use strict metadata verification?", default=strict_metadata)
+
+    return RuntimeOptions(
+        server_required=server_required,
+        type_subfolders=type_subfolders,
+        modpack_zip=modpack_zip,
+        strict_metadata=strict_metadata,
+        dry_run=dry_run,
+    )
+
+
+def _saved_download_option(saved_options: dict[str, bool] | None, name: str) -> bool:
+    if saved_options:
+        value = saved_options.get(name)
+        if isinstance(value, bool):
+            return value
+    return DEFAULT_DOWNLOAD_OPTIONS[name]
+
+
+def _get_loader_filters_for_selected_types(
+    selected_types: set[str],
+    console: Console,
+    *,
+    yes: bool,
+    saved_inputs: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     filters = {"mod": [], "shader": [], "plugin": []}
+    saved_inputs = saved_inputs or {}
 
     if selected_types.intersection(MOD_LOADER_TYPES):
         filters["mod"] = _optional_list(
-            args.mod_loaders,
             prompt="Mod/modpack loader filter, comma-separated, blank for any",
             console=console,
             yes=yes,
+            saved_default=saved_inputs.get("mod_loaders", ""),
         )
-    elif args.mod_loaders:
-        console.print("[yellow]Ignoring --loaders because no mods or modpacks are selected.[/]")
 
     if selected_types.intersection(SHADER_LOADER_TYPES):
         filters["shader"] = _optional_list(
-            args.shader_loaders,
             prompt="Shader loader filter, comma-separated, blank for any",
             console=console,
             yes=yes,
+            saved_default=saved_inputs.get("shader_loaders", ""),
         )
-    elif args.shader_loaders:
-        console.print("[yellow]Ignoring --shader-loaders because no shaders are selected.[/]")
 
     if selected_types.intersection(PLUGIN_LOADER_TYPES):
         filters["plugin"] = _optional_list(
-            args.plugin_loaders,
             prompt="Plugin platform filter, comma-separated, blank for any",
             console=console,
             yes=yes,
+            saved_default=saved_inputs.get("plugin_loaders", ""),
         )
-    elif args.plugin_loaders:
-        console.print("[yellow]Ignoring --plugin-loaders because no plugins are selected.[/]")
 
     skipped_types = sorted(NO_LOADER_FILTER_TYPES.intersection(selected_types))
     if skipped_types:
@@ -540,10 +658,8 @@ def _get_loader_filters_for_selected_types(
     return filters
 
 
-def _get_token_for_saving(args: argparse.Namespace, console: Console) -> str | None:
-    raw_token = args.token
-    if not raw_token:
-        raw_token = getpass.getpass("Modrinth Personal Access Token: ")
+def _get_token_for_saving(console: Console) -> str | None:
+    raw_token = getpass.getpass("Modrinth Personal Access Token: ")
     token = normalize_token(raw_token)
     if not token:
         console.print("[red]Token cannot be blank.[/]")
@@ -587,41 +703,66 @@ def _order_projects(project_ids: list[str], projects: list[dict[str, Any]]) -> l
 
 
 def _select_types(
-    requested_types: str | None,
     type_counts: Counter[str],
     console: Console,
     *,
     yes: bool,
+    saved_default: str | None = None,
 ) -> set[str]:
     available = sorted(type_counts)
-    if requested_types:
-        return parse_type_selection(requested_types, available)
+    default = _type_selection_default(saved_default, available)
 
     if yes:
-        return set(available)
+        return parse_type_selection(default, available)
 
     while True:
-        raw = Prompt.ask("Select item types by number/name, or all", default="all")
+        raw = Prompt.ask("Select item types by number/name, or all", default=default)
         try:
             return parse_type_selection(raw, available)
         except ValueError as exc:
             console.print(f"[red]{exc}[/]")
 
 
-def _optional_list(value: str | None, *, prompt: str, console: Console, yes: bool) -> list[str]:
-    if value is not None:
-        return parse_csv(value)
-    if yes:
-        return []
-    return parse_csv(Prompt.ask(prompt, default=""))
+def _type_selection_default(saved_default: str | None, available: list[str]) -> str:
+    if saved_default:
+        try:
+            parse_type_selection(saved_default, available)
+        except ValueError:
+            pass
+        else:
+            return saved_default
+    return "all"
 
 
-def _get_channels(value: str | None, console: Console, *, yes: bool) -> list[str]:
-    if value is not None:
-        return parse_channel_selection(value)
+def _format_type_selection(selected_types: set[str], type_counts: Counter[str]) -> str:
+    available = set(type_counts)
+    if selected_types == available:
+        return "all"
+    return ",".join(sorted(selected_types))
+
+
+def _optional_list(
+    *,
+    prompt: str,
+    console: Console,
+    yes: bool,
+    saved_default: str = "",
+) -> list[str]:
     if yes:
-        return list(DEFAULT_CHANNELS)
-    raw_channels = Prompt.ask("Version channels, comma-separated, or all", default=",".join(DEFAULT_CHANNELS))
+        return parse_csv(saved_default)
+    return parse_csv(Prompt.ask(prompt, default=saved_default))
+
+
+def _get_channels(
+    console: Console,
+    *,
+    yes: bool,
+    saved_default: str | None = None,
+) -> list[str]:
+    default = saved_default or ",".join(DEFAULT_CHANNELS)
+    if yes:
+        return parse_channel_selection(default)
+    raw_channels = Prompt.ask("Release channels to include (release,beta,alpha, or all)", default=default)
     return parse_channel_selection(raw_channels)
 
 
@@ -635,15 +776,11 @@ def parse_channel_selection(value: str | None) -> list[str]:
 
 
 def _get_output_dir(
-    requested_output: str | None,
     config: AppConfig,
     console: Console,
     *,
     yes: bool,
 ) -> Path | None:
-    if requested_output:
-        return Path(requested_output).expanduser()
-
     if yes:
         if config.last_download_dir:
             return Path(config.last_download_dir).expanduser()
@@ -657,6 +794,14 @@ def _get_output_dir(
         if raw.strip():
             return Path(raw).expanduser()
         console.print("[red]Download folder cannot be blank.[/]")
+
+
+def _get_log_file(config: AppConfig, console: Console, *, yes: bool) -> str | None:
+    default = config.last_download_inputs.get("log_file", "")
+    if yes:
+        return default or None
+    raw = Prompt.ask("Log file or folder, blank for automatic", default=default)
+    return raw.strip() or None
 
 
 def _print_type_summary(console: Console, type_counts: Counter[str]) -> None:

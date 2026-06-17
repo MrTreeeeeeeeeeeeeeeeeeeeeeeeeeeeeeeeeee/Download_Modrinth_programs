@@ -4,12 +4,14 @@ from rich.console import Console
 from modrinth_collection_downloader import cli as cli_module
 from modrinth_collection_downloader.cli import (
     PlannedDownload,
+    RuntimeOptions,
     _build_download_plan,
     _download_planned,
     _get_channels,
+    _resolve_runtime_options,
     build_parser,
-    filter_server_required_mods,
-    is_server_required_mod,
+    filter_server_required_projects,
+    is_server_required_project,
     loader_filter_for_project_type,
     modpack_folder_name,
     modpack_zip_filename,
@@ -61,33 +63,182 @@ def test_loader_filter_for_project_type_uses_type_specific_filters():
     assert loader_filter_for_project_type("datapack", filters) == []
 
 
-def test_parser_keeps_loaders_as_mod_loader_filter():
-    args = build_parser().parse_args(["abc123", "--loaders", "fabric", "--shader-loaders", "iris"])
+def test_parser_accepts_only_collection_and_yes():
+    args = build_parser().parse_args(["abc123", "--yes"])
 
-    assert args.mod_loaders == "fabric"
-    assert args.shader_loaders == "iris"
-
-
-def test_parser_supports_flat_mode():
-    args = build_parser().parse_args(["abc123", "--flat"])
-
-    assert args.flat is True
-    assert args.group_by_type is False
+    assert args.collection == "abc123"
+    assert args.yes is True
 
 
-def test_parser_supports_modpack_zip():
-    args = build_parser().parse_args(["abc123", "--modpack-zip"])
+def test_parser_rejects_old_startup_option_flags():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["abc123", "--dry-run"])
 
-    assert args.modpack_zip is True
-
-
-def test_parser_supports_server_required_mods_filter():
-    args = build_parser().parse_args(["abc123", "--server-required"])
-
-    assert args.server_required is True
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["abc123", "--loaders", "fabric"])
 
 
-def test_server_required_mod_filter_keeps_only_required_server_mods():
+def test_runtime_options_prompt_for_flags_during_interactive_run(monkeypatch, tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    prompts = []
+    answers = iter([True, True, False, True])
+
+    def fake_confirm(prompt, *, default=False):
+        prompts.append((prompt, default))
+        return next(answers)
+
+    monkeypatch.setattr(cli_module.Confirm, "ask", staticmethod(fake_confirm))
+
+    options = _resolve_runtime_options(
+        {"mod", "modpack"},
+        console,
+        yes=False,
+    )
+    console.file.close()
+
+    assert options == RuntimeOptions(
+        server_required=True,
+        type_subfolders=False,
+        modpack_zip=True,
+        strict_metadata=False,
+        dry_run=True,
+    )
+    assert prompts == [
+        ("Only download server-required mods and modpacks?", False),
+        ("Convert modpack .mrpack files into full .zip archives?", False),
+        ("Organize downloads into project-type folders?", True),
+        ("Show the download plan only?", False),
+    ]
+
+
+def test_runtime_options_offer_server_required_mode_for_modpacks(monkeypatch, tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    prompts = []
+    answers = iter([True, False, True, True])
+
+    def fake_confirm(prompt, *, default=False):
+        prompts.append((prompt, default))
+        return next(answers)
+
+    monkeypatch.setattr(cli_module.Confirm, "ask", staticmethod(fake_confirm))
+
+    options = _resolve_runtime_options(
+        {"modpack"},
+        console,
+        yes=False,
+    )
+    console.file.close()
+
+    assert options == RuntimeOptions(
+        server_required=True,
+        type_subfolders=True,
+        modpack_zip=False,
+        strict_metadata=False,
+        dry_run=True,
+    )
+    assert prompts == [
+        ("Only download server-required mods and modpacks?", False),
+        ("Convert modpack .mrpack files into full .zip archives?", False),
+        ("Organize downloads into project-type folders?", True),
+        ("Show the download plan only?", False),
+    ]
+
+
+def test_runtime_options_use_saved_defaults_for_prompts(monkeypatch, tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    prompts = []
+
+    def fake_confirm(prompt, *, default=False):
+        prompts.append((prompt, default))
+        return default
+
+    monkeypatch.setattr(cli_module.Confirm, "ask", staticmethod(fake_confirm))
+    options = _resolve_runtime_options(
+        {"mod", "modpack"},
+        console,
+        yes=False,
+        saved_options={
+            "server_required": True,
+            "type_subfolders": False,
+            "modpack_zip": True,
+            "strict_metadata": True,
+            "dry_run": False,
+        },
+    )
+    console.file.close()
+
+    assert options == RuntimeOptions(
+        server_required=True,
+        type_subfolders=False,
+        modpack_zip=True,
+        strict_metadata=True,
+        dry_run=False,
+    )
+    assert prompts == [
+        ("Only download server-required mods and modpacks?", True),
+        ("Convert modpack .mrpack files into full .zip archives?", True),
+        ("Organize downloads into project-type folders?", False),
+        ("Show the download plan only?", False),
+        ("Use strict metadata verification?", True),
+    ]
+
+
+def test_runtime_options_use_defaults_for_yes_runs(monkeypatch, tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    monkeypatch.setattr(
+        cli_module.Confirm,
+        "ask",
+        staticmethod(lambda *args, **kwargs: pytest.fail("--yes should not prompt")),
+    )
+
+    options = _resolve_runtime_options(
+        {"mod", "modpack"},
+        console,
+        yes=True,
+    )
+    console.file.close()
+
+    assert options == RuntimeOptions(
+        server_required=False,
+        type_subfolders=True,
+        modpack_zip=False,
+        strict_metadata=False,
+        dry_run=False,
+    )
+
+
+def test_runtime_options_use_saved_defaults_for_yes_runs(monkeypatch, tmp_path):
+    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
+    monkeypatch.setattr(
+        cli_module.Confirm,
+        "ask",
+        staticmethod(lambda *args, **kwargs: pytest.fail("--yes should not prompt")),
+    )
+
+    options = _resolve_runtime_options(
+        {"mod", "modpack"},
+        console,
+        yes=True,
+        saved_options={
+            "server_required": True,
+            "type_subfolders": False,
+            "modpack_zip": True,
+            "strict_metadata": True,
+            "dry_run": True,
+        },
+    )
+    console.file.close()
+
+    assert options == RuntimeOptions(
+        server_required=True,
+        type_subfolders=False,
+        modpack_zip=True,
+        strict_metadata=True,
+        dry_run=True,
+    )
+
+
+def test_server_required_project_filter_keeps_only_required_server_mods_and_modpacks():
     server_only = {
         "id": "server-only",
         "project_type": "mod",
@@ -99,6 +250,18 @@ def test_server_required_mod_filter_keeps_only_required_server_mods():
         "project_type": "mod",
         "client_side": "required",
         "server_side": "required",
+    }
+    required_modpack = {
+        "id": "required-modpack",
+        "project_type": "modpack",
+        "client_side": "required",
+        "server_side": "required",
+    }
+    client_only_modpack = {
+        "id": "client-only-modpack",
+        "project_type": "modpack",
+        "client_side": "required",
+        "server_side": "unsupported",
     }
     client_only = {
         "id": "client-only",
@@ -119,20 +282,22 @@ def test_server_required_mod_filter_keeps_only_required_server_mods():
         "server_side": "required",
     }
 
-    assert is_server_required_mod(server_only) is True
-    assert is_server_required_mod(client_and_server) is True
-    assert is_server_required_mod(client_only) is False
-    assert is_server_required_mod(optional_server) is False
-    assert is_server_required_mod(plugin) is False
-    assert filter_server_required_mods(
-        [server_only, client_and_server, client_only, optional_server, plugin]
-    ) == [server_only, client_and_server]
+    assert is_server_required_project(server_only) is True
+    assert is_server_required_project(client_and_server) is True
+    assert is_server_required_project(required_modpack) is True
+    assert is_server_required_project(client_only) is False
+    assert is_server_required_project(client_only_modpack) is False
+    assert is_server_required_project(optional_server) is False
+    assert is_server_required_project(plugin) is False
+    assert filter_server_required_projects(
+        [server_only, client_and_server, required_modpack, client_only, client_only_modpack, optional_server, plugin]
+    ) == [server_only, client_and_server, required_modpack]
 
 
 def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
     console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
 
-    channels = _get_channels(None, console, yes=True)
+    channels = _get_channels(console, yes=True)
     console.file.close()
 
     assert channels == ["release", "beta"]
