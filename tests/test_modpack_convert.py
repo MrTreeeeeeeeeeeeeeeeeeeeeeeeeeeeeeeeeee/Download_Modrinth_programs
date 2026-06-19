@@ -7,7 +7,6 @@ import pytest
 from modrinth_collection_downloader.download import DownloadOutcome
 from modrinth_collection_downloader.modpack_convert import (
     ModpackConversionError,
-    SERVER_REQUIRED_MARKER,
     convert_mrpack_to_zip,
 )
 
@@ -41,10 +40,6 @@ def file_entry(path: str, *urls: str, env: dict | None = None) -> dict:
     if env is not None:
         entry["env"] = env
     return entry
-
-
-def modrinth_url(project_id: str, filename: str = "file.jar") -> str:
-    return f"https://cdn.modrinth.com/data/{project_id}/versions/version-id/{filename}"
 
 
 def fake_downloader(files: dict[str, bytes], failures: set[str] | None = None):
@@ -138,79 +133,6 @@ def test_convert_mrpack_filters_client_env(tmp_path):
     )
 
     assert zip_names(output) == {"mods/missing-env.jar", "mods/required.jar", "mods/optional.jar"}
-
-
-def test_convert_mrpack_filters_server_required_env_for_server_zip(tmp_path):
-    mrpack = tmp_path / "pack.mrpack"
-    output = tmp_path / "pack.zip"
-    make_mrpack(
-        mrpack,
-        manifest(
-            [
-                file_entry(
-                    "mods/common.jar",
-                    modrinth_url("common-project", "common.jar"),
-                    env={"client": "required", "server": "required"},
-                ),
-                file_entry(
-                    "mods/client-and-server.jar",
-                    modrinth_url("both-project", "both.jar"),
-                    env={"client": "required", "server": "required"},
-                ),
-                file_entry(
-                    "mods/server-only.jar",
-                    modrinth_url("server-project", "server.jar"),
-                    env={"client": "required", "server": "required"},
-                ),
-                file_entry(
-                    "mods/optional.jar",
-                    modrinth_url("optional-project", "optional.jar"),
-                    env={"client": "required", "server": "required"},
-                ),
-                file_entry(
-                    "mods/client.jar",
-                    modrinth_url("client-project", "client.jar"),
-                    env={"client": "required", "server": "required"},
-                ),
-            ]
-        ),
-        {
-            "overrides/config/common.toml": "common",
-            "client-overrides/config/client.toml": "client",
-            "server-overrides/config/server.toml": "server",
-        },
-    )
-
-    convert_mrpack_to_zip(
-        mrpack,
-        output,
-        downloader=fake_downloader(
-            {
-                modrinth_url("common-project", "common.jar"): b"comm",
-                modrinth_url("both-project", "both.jar"): b"both",
-                modrinth_url("server-project", "server.jar"): b"serv",
-                modrinth_url("optional-project", "optional.jar"): b"opt!",
-                modrinth_url("client-project", "client.jar"): b"nope",
-            }
-        ),
-        project_metadata_resolver=lambda ids: [
-            {"id": "common-project", "server_side": "required", "client_side": "required"},
-            {"id": "both-project", "server_side": "required", "client_side": "required"},
-            {"id": "server-project", "server_side": "required", "client_side": "unsupported"},
-            {"id": "optional-project", "server_side": "optional", "client_side": "required"},
-            {"id": "client-project", "server_side": "unsupported", "client_side": "required"},
-        ],
-        server_required_only=True,
-    )
-
-    assert zip_names(output) == {
-        SERVER_REQUIRED_MARKER,
-        "config/common.toml",
-        "config/server.toml",
-        "mods/common.jar",
-        "mods/client-and-server.jar",
-        "mods/server-only.jar",
-    }
 
 
 def test_convert_mrpack_removes_stale_zip_part_files(tmp_path):

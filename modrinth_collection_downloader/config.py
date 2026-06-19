@@ -10,7 +10,6 @@ from typing import Any, Mapping
 CONFIG_ENV_VAR = "MODRINTH_COLLECTION_DOWNLOADER_CONFIG"
 DEFAULT_CONFIG_PATH = Path.home() / ".modrinth_collection_downloader" / "config.json"
 DEFAULT_DOWNLOAD_OPTIONS = {
-    "server_required": False,
     "type_subfolders": True,
     "modpack_zip": False,
     "strict_metadata": False,

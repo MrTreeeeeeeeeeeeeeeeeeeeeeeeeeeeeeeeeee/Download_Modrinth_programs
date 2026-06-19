@@ -10,6 +10,12 @@ From this folder:
 python -m pip install -e .
 ```
 
+Installing does not start the downloader. To run it after installing:
+
+```powershell
+python -m modrinth_collection_downloader
+```
+
 ## Basic Usage
 
 Interactive mode:
@@ -18,7 +24,7 @@ Interactive mode:
 python -m modrinth_collection_downloader
 ```
 
-The program asks for the collection, item types, version filters, download folder, and run options while it is running. You can choose server-required mods and modpacks, type subfolders versus flat output, modpack ZIP conversion, dry run, and strict verification from the prompts instead of adding startup flags.
+The program asks for the collection, item types, version filters, download folder, and run options while it is running. You can choose type subfolders versus flat output, modpack ZIP conversion, dry run, and strict verification from the prompts instead of adding startup flags.
 
 Direct collection URL:
 
@@ -44,14 +50,11 @@ The app fetches the collection before asking filter questions, then shows the it
 - Shaders use a separate shader loader prompt.
 - Plugins use a separate plugin platform prompt.
 - Resource packs and datapacks are never filtered by loader, even when a mod loader is specified.
-- Server-required mode is offered when mods or modpacks are selected.
 - Modpack ZIP conversion is offered when modpacks are selected.
 
 Interactive runs also ask which release channels to include. The default is `release,beta` because some common collection items, including resource packs, publish compatible versions as beta. Enter `all` to include `release,beta,alpha`. Enter `release` when you want release-only downloads.
 
 Minecraft version matching handles versions that list several compatible game versions, and also treats minor-series entries like `1.20` or `1.20.x` as compatible with patch versions such as `1.20.1`.
-
-Choose server-required mode during an interactive run to download only Modrinth projects whose type is `mod` or `modpack` and whose server-side environment is `required`. This includes server-only items and items required on both client and server, and excludes client-only items plus items that are only optional on the server.
 
 By default, every downloaded file is placed in a subfolder named for its Modrinth project type:
 
@@ -76,7 +79,7 @@ output-folder/
       Pack Name Version.zip
 ```
 
-The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. In server-required mode, converted modpack zips use a `-server.zip` filename, look up each referenced Modrinth project, include files whose project server-side environment is `required`, and copy `overrides/` plus `server-overrides/` instead of client overrides. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
+The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
 
 Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
 

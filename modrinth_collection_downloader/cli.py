@@ -8,7 +8,7 @@ import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from rich.console import Console
 from rich.progress import BarColumn, DownloadColumn, Progress, TaskProgressColumn, TextColumn
@@ -38,7 +38,7 @@ from .download import (
     select_version_file,
 )
 from .modrinth import ApiError, ModrinthClient, parse_collection_id
-from .modpack_convert import SERVER_REQUIRED_MARKER, convert_mrpack_to_zip
+from .modpack_convert import convert_mrpack_to_zip
 from .run_log import RunLog, resolve_log_path
 
 
@@ -46,10 +46,8 @@ MOD_LOADER_TYPES = {"mod", "modpack"}
 SHADER_LOADER_TYPES = {"shader"}
 PLUGIN_LOADER_TYPES = {"plugin"}
 NO_LOADER_FILTER_TYPES = {"resourcepack", "datapack"}
-SERVER_REQUIRED_TYPES = {"mod", "modpack"}
 ALL_CHANNELS = ["release", "beta", "alpha"]
 DEFAULT_CHANNELS = ["release", "beta"]
-SERVER_REQUIRED_SIDE = "required"
 TYPE_ALIASES = {
     "mods": "mod",
     "modpacks": "modpack",
@@ -73,7 +71,6 @@ class PlannedDownload:
     file: dict[str, Any]
     destination: DestinationPlan
     convert_modpack_zip: bool = False
-    server_required_only: bool = False
 
 
 @dataclass
@@ -84,7 +81,6 @@ class SkippedProject:
 
 @dataclass
 class RuntimeOptions:
-    server_required: bool
     type_subfolders: bool
     modpack_zip: bool
     strict_metadata: bool
@@ -92,7 +88,6 @@ class RuntimeOptions:
 
     def to_config(self) -> dict[str, bool]:
         return {
-            "server_required": self.server_required,
             "type_subfolders": self.type_subfolders,
             "modpack_zip": self.modpack_zip,
             "strict_metadata": self.strict_metadata,
@@ -289,7 +284,6 @@ def main(argv: list[str] | None = None) -> int:
     run_log.add("Config saved", reason="download options")
     run_log.add(
         "Download options selected",
-        server_required=runtime_options.server_required,
         dry_run=runtime_options.dry_run,
         modpack_zip=runtime_options.modpack_zip,
         strict_metadata=runtime_options.strict_metadata,
@@ -300,25 +294,6 @@ def main(argv: list[str] | None = None) -> int:
     selected_projects = [
         project for project in ordered_projects if project.get("project_type", "unknown") in selected_types
     ]
-    if runtime_options.server_required:
-        before_count = len(selected_projects)
-        selected_projects = filter_server_required_projects(selected_projects)
-        removed_count = before_count - len(selected_projects)
-        console.print(
-            "[dim]Server-required mode: "
-            f"{len(selected_projects)} server-required mod/modpack item(s) selected; "
-            f"{removed_count} item(s) excluded.[/]"
-        )
-        run_log.add(
-            "Server-required project filter applied",
-            before=before_count,
-            after=len(selected_projects),
-            excluded=removed_count,
-        )
-        if not selected_projects:
-            console.print("[yellow]No server-required mods or modpacks matched the selected filters.[/]")
-            run_log.add("No server-required projects selected")
-            return finish(0)
 
     minecraft_versions = _optional_list(
         prompt="Minecraft version filter, blank for any",
@@ -391,7 +366,6 @@ def main(argv: list[str] | None = None) -> int:
         channels=channels,
         group_by_type=type_subfolders,
         modpack_zip=runtime_options.modpack_zip,
-        server_required=runtime_options.server_required,
         console=console,
         run_log=run_log,
     )
@@ -412,7 +386,6 @@ def main(argv: list[str] | None = None) -> int:
     failures = _download_planned(
         console,
         planned,
-        modrinth_client=client,
         strict_metadata=runtime_options.strict_metadata,
         run_log=run_log,
     )
@@ -556,17 +529,6 @@ def loader_filter_for_project_type(project_type: str, loader_filters: dict[str, 
     return []
 
 
-def is_server_required_project(project: dict[str, Any]) -> bool:
-    return (
-        project.get("project_type") in SERVER_REQUIRED_TYPES
-        and str(project.get("server_side", "")).lower() == SERVER_REQUIRED_SIDE
-    )
-
-
-def filter_server_required_projects(projects: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [project for project in projects if is_server_required_project(project)]
-
-
 def _resolve_runtime_options(
     selected_types: set[str],
     console: Console,
@@ -574,7 +536,6 @@ def _resolve_runtime_options(
     yes: bool,
     saved_options: dict[str, bool] | None = None,
 ) -> RuntimeOptions:
-    server_required = _saved_download_option(saved_options, "server_required")
     type_subfolders = _saved_download_option(saved_options, "type_subfolders")
     modpack_zip = _saved_download_option(saved_options, "modpack_zip")
     strict_metadata = _saved_download_option(saved_options, "strict_metadata")
@@ -582,7 +543,6 @@ def _resolve_runtime_options(
 
     if yes:
         return RuntimeOptions(
-            server_required=server_required,
             type_subfolders=type_subfolders,
             modpack_zip=modpack_zip,
             strict_metadata=strict_metadata,
@@ -598,9 +558,6 @@ def _resolve_runtime_options(
             prompted = True
         return Confirm.ask(prompt, default=default)
 
-    if selected_types.intersection(SERVER_REQUIRED_TYPES):
-        server_required = ask("Only download server-required mods and modpacks?", default=server_required)
-
     if "modpack" in selected_types:
         modpack_zip = ask("Convert modpack .mrpack files into full .zip archives?", default=modpack_zip)
 
@@ -612,7 +569,6 @@ def _resolve_runtime_options(
         strict_metadata = ask("Use strict metadata verification?", default=strict_metadata)
 
     return RuntimeOptions(
-        server_required=server_required,
         type_subfolders=type_subfolders,
         modpack_zip=modpack_zip,
         strict_metadata=strict_metadata,
@@ -836,8 +792,6 @@ def modpack_zip_filename(
     file: dict[str, Any],
     project: dict[str, Any],
     version: dict[str, Any],
-    *,
-    server_required: bool = False,
 ) -> str:
     fallback = f"{project.get('slug') or project.get('id') or 'modpack'}-{version.get('version_number') or version.get('id') or 'version'}.mrpack"
     filename = sanitize_filename(str(file.get("filename") or fallback))
@@ -849,9 +803,6 @@ def modpack_zip_filename(
     else:
         zip_name = f"{filename}.zip"
 
-    if server_required:
-        zip_path = Path(zip_name)
-        return f"{zip_path.stem}-server.zip"
     return zip_name
 
 
@@ -861,16 +812,9 @@ def resolve_modpack_zip_destination(
     *,
     project_slug: str | None,
     version_id: str | None,
-    server_required: bool = False,
 ) -> DestinationPlan:
     candidate = pack_dir / sanitize_filename(filename)
     if candidate.exists() and _is_valid_zip_file(candidate):
-        if server_required and not _has_zip_entry(candidate, SERVER_REQUIRED_MARKER):
-            return DestinationPlan(
-                candidate,
-                "replace",
-                "Existing server zip predates server-required metadata filtering.",
-            )
         return DestinationPlan(candidate, "already_exists", "Existing converted zip is valid.")
     return resolve_destination(
         pack_dir,
@@ -890,14 +834,6 @@ def _is_valid_zip_file(path: Path) -> bool:
         return False
 
 
-def _has_zip_entry(path: Path, entry_name: str) -> bool:
-    try:
-        with zipfile.ZipFile(path) as archive:
-            return entry_name in archive.namelist()
-    except (OSError, zipfile.BadZipFile):
-        return False
-
-
 def _build_download_plan(
     *,
     client: ModrinthClient,
@@ -909,7 +845,6 @@ def _build_download_plan(
     group_by_type: bool,
     console: Console,
     modpack_zip: bool = False,
-    server_required: bool = False,
     run_log: RunLog | None = None,
 ) -> tuple[list[PlannedDownload], list[PlannedDownload], list[SkippedProject]]:
     planned: list[PlannedDownload] = []
@@ -969,10 +904,9 @@ def _build_download_plan(
             pack_dir = output_dir / "modpack" / modpack_folder_name(project)
             destination = resolve_modpack_zip_destination(
                 pack_dir,
-                modpack_zip_filename(file, project, version, server_required=server_required),
+                modpack_zip_filename(file, project, version),
                 project_slug=project.get("slug"),
                 version_id=version.get("id"),
-                server_required=server_required,
             )
             item = PlannedDownload(
                 project,
@@ -980,7 +914,6 @@ def _build_download_plan(
                 file,
                 destination,
                 convert_modpack_zip=True,
-                server_required_only=server_required,
             )
         else:
             target_dir = output_dir
@@ -1007,7 +940,6 @@ def _build_download_plan(
                     destination=destination.path,
                     reason=destination.reason,
                     converted_modpack=item.convert_modpack_zip,
-                    server_required_only=item.server_required_only,
                 )
         else:
             planned.append(item)
@@ -1022,7 +954,6 @@ def _build_download_plan(
                     size=file.get("size"),
                     pack_folder=destination.path.parent if item.convert_modpack_zip else "(none)",
                     converted_modpack=item.convert_modpack_zip,
-                    server_required_only=item.server_required_only,
                 )
 
     return planned, already_existing, skipped
@@ -1077,7 +1008,6 @@ def _download_planned(
     console: Console,
     planned: list[PlannedDownload],
     *,
-    modrinth_client: ModrinthClient | None = None,
     strict_metadata: bool = False,
     run_log: RunLog | None = None,
 ) -> list[tuple[PlannedDownload, str]]:
@@ -1109,7 +1039,6 @@ def _download_planned(
                     source_filename=filename,
                     index=index,
                     total=total,
-                    modrinth_client=modrinth_client,
                     strict_metadata=strict_metadata,
                     run_log=run_log,
                 )
@@ -1192,7 +1121,6 @@ def _download_converted_modpack(
     source_filename: str,
     index: int,
     total: int,
-    modrinth_client: ModrinthClient | None,
     strict_metadata: bool,
     run_log: RunLog | None,
 ) -> str | None:
@@ -1245,9 +1173,7 @@ def _download_converted_modpack(
             result = convert_mrpack_to_zip(
                 source_path,
                 item.destination.path,
-                project_metadata_resolver=modrinth_client.get_projects if modrinth_client else None,
                 strict_metadata=strict_metadata,
-                server_required_only=item.server_required_only,
                 progress_callback=lambda message: progress.console.print(f"[dim]  {message}[/]"),
                 run_log=run_log,
             )

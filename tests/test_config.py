@@ -36,7 +36,6 @@ def test_save_and_load_config_with_folder_and_token(tmp_path):
             "log_file": "C:/Logs",
         },
         last_download_options={
-            "server_required": True,
             "type_subfolders": False,
             "modpack_zip": True,
             "strict_metadata": True,
@@ -61,7 +60,6 @@ def test_save_and_load_config_with_folder_and_token(tmp_path):
         "log_file": "C:/Logs",
     }
     assert loaded.last_download_options == {
-        "server_required": True,
         "type_subfolders": False,
         "modpack_zip": True,
         "strict_metadata": True,
@@ -87,7 +85,7 @@ def test_remember_download_choices_normalizes_supported_fields(tmp_path):
     remember_download_options(
         config,
         {
-            "server_required": True,
+            "unknown": True,
             "type_subfolders": False,
             "dry_run": "not-a-bool",
         },
@@ -102,7 +100,6 @@ def test_remember_download_choices_normalizes_supported_fields(tmp_path):
         "minecraft_version": "1.21.1",
     }
     assert loaded.last_download_options == {
-        "server_required": True,
         "type_subfolders": False,
     }
 

@@ -6,16 +6,13 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
+from typing import Any, Callable
 
 from .download import DownloadOutcome, download_file, sanitize_filename
 from .run_log import RunLog
 
 
 CLIENT_OVERRIDE_PREFIXES = ("overrides/", "client-overrides/")
-SERVER_OVERRIDE_PREFIXES = ("overrides/", "server-overrides/")
-SERVER_REQUIRED_MARKER = "SERVER_REQUIRED_MODRINTH_PROJECT_FILTER.txt"
 
 
 class ModpackConversionError(RuntimeError):
@@ -40,9 +37,7 @@ def convert_mrpack_to_zip(
     output_zip_path: Path,
     *,
     downloader: Callable[..., DownloadOutcome] = download_file,
-    project_metadata_resolver: Callable[[list[str]], list[dict[str, Any]]] | None = None,
     strict_metadata: bool = False,
-    server_required_only: bool = False,
     progress_callback: Callable[[str], None] | None = None,
     run_log: RunLog | None = None,
 ) -> ModpackConversionResult:
@@ -64,7 +59,6 @@ def convert_mrpack_to_zip(
                     name=manifest.get("name"),
                     version_id=manifest.get("versionId"),
                     file_count=len(manifest.get("files") or []),
-                    server_required_only=server_required_only,
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -74,7 +68,6 @@ def convert_mrpack_to_zip(
                         mrpack,
                         output_zip,
                         missing_files=missing_files,
-                        server_required_only=server_required_only,
                         run_log=run_log,
                     )
                     _download_manifest_files(
@@ -82,21 +75,11 @@ def convert_mrpack_to_zip(
                         output_zip,
                         temp_dir=temp_dir,
                         downloader=downloader,
-                        project_metadata_resolver=project_metadata_resolver,
                         strict_metadata=strict_metadata,
-                        server_required_only=server_required_only,
                         missing_files=missing_files,
                         progress_callback=progress_callback,
                         run_log=run_log,
                     )
-                    if server_required_only:
-                        output_zip.writestr(
-                            SERVER_REQUIRED_MARKER,
-                            (
-                                "This zip was converted in server-required mode using referenced "
-                                "Modrinth project server-side metadata.\n"
-                            ),
-                        )
                     if missing_files:
                         output_zip.writestr("FAILED_DOWNLOADS.txt", _format_failed_downloads(missing_files))
 
@@ -176,7 +159,6 @@ def _copy_overrides(
     output_zip: zipfile.ZipFile,
     *,
     missing_files: list[MissingModpackFile],
-    server_required_only: bool,
     run_log: RunLog | None,
 ) -> None:
     for info in mrpack.infolist():
@@ -184,7 +166,7 @@ def _copy_overrides(
         if info.is_dir() or source_name == "modrinth.index.json":
             continue
 
-        target_name = _override_target_path(source_name, server_required_only=server_required_only)
+        target_name = _override_target_path(source_name)
         if target_name is None:
             continue
         if not is_safe_zip_path(target_name):
@@ -197,9 +179,8 @@ def _copy_overrides(
         output_zip.writestr(target_name, mrpack.read(info))
 
 
-def _override_target_path(source_name: str, *, server_required_only: bool) -> str | None:
-    prefixes = SERVER_OVERRIDE_PREFIXES if server_required_only else CLIENT_OVERRIDE_PREFIXES
-    for prefix in prefixes:
+def _override_target_path(source_name: str) -> str | None:
+    for prefix in CLIENT_OVERRIDE_PREFIXES:
         if source_name.startswith(prefix):
             target = source_name[len(prefix) :]
             return target or None
@@ -212,38 +193,18 @@ def _download_manifest_files(
     *,
     temp_dir: Path,
     downloader: Callable[..., DownloadOutcome],
-    project_metadata_resolver: Callable[[list[str]], list[dict[str, Any]]] | None,
     strict_metadata: bool,
-    server_required_only: bool,
     missing_files: list[MissingModpackFile],
     progress_callback: Callable[[str], None] | None,
     run_log: RunLog | None,
 ) -> None:
     files = manifest.get("files") or []
-    project_metadata = _resolve_manifest_project_metadata(
-        files,
-        project_metadata_resolver=project_metadata_resolver,
-        server_required_only=server_required_only,
-        run_log=run_log,
-    )
     included_files = [
         file_entry
         for file_entry in files
-        if _include_manifest_file(
-            file_entry,
-            server_required_only=server_required_only,
-            project_metadata=project_metadata,
-        )
+        if _include_manifest_file(file_entry)
     ]
     total = len(included_files)
-    if run_log and server_required_only:
-        run_log.add(
-            "Modpack server-required file filter applied",
-            total_files=len(files),
-            included=total,
-            excluded=len(files) - total,
-            metadata_projects=len(project_metadata),
-        )
 
     for index, file_entry in enumerate(included_files, start=1):
         path = str(file_entry.get("path") or "")
@@ -317,83 +278,11 @@ def _downloads(file_entry: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(download) for download in downloads if download)
 
 
-def _include_manifest_file(
-    file_entry: dict[str, Any],
-    *,
-    server_required_only: bool = False,
-    project_metadata: Mapping[str, dict[str, Any]] | None = None,
-) -> bool:
+def _include_manifest_file(file_entry: dict[str, Any]) -> bool:
     env = file_entry.get("env")
-    if server_required_only:
-        project_id = _modrinth_project_id(file_entry)
-        if project_id:
-            project = (project_metadata or {}).get(project_id)
-            if project:
-                return str(project.get("server_side", "")).lower() == "required"
-            return False
-        if not isinstance(env, dict):
-            return False
-        return str(env.get("server", "")).lower() == "required"
-
     if not isinstance(env, dict):
         return True
     return str(env.get("client", "required")).lower() != "unsupported"
-
-
-def _resolve_manifest_project_metadata(
-    files: list[Any],
-    *,
-    project_metadata_resolver: Callable[[list[str]], list[dict[str, Any]]] | None,
-    server_required_only: bool,
-    run_log: RunLog | None,
-) -> dict[str, dict[str, Any]]:
-    if not server_required_only or project_metadata_resolver is None:
-        return {}
-
-    project_ids = sorted(
-        {
-            project_id
-            for file_entry in files
-            if isinstance(file_entry, dict)
-            for project_id in [_modrinth_project_id(file_entry)]
-            if project_id
-        }
-    )
-    if not project_ids:
-        return {}
-
-    try:
-        projects = project_metadata_resolver(project_ids)
-    except Exception as exc:
-        if run_log:
-            run_log.add(
-                "Modpack project metadata lookup failed",
-                project_count=len(project_ids),
-                error=exc,
-            )
-        return {}
-
-    metadata = {
-        str(project.get("id")): project
-        for project in projects
-        if isinstance(project, dict) and project.get("id")
-    }
-    if run_log:
-        run_log.add(
-            "Modpack project metadata resolved",
-            requested=len(project_ids),
-            returned=len(metadata),
-        )
-    return metadata
-
-
-def _modrinth_project_id(file_entry: dict[str, Any]) -> str | None:
-    for download in _downloads(file_entry):
-        parsed = urlparse(download)
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) >= 4 and parts[0] == "data" and parts[2] == "versions":
-            return parts[1]
-    return None
 
 
 def _remove_stale_part_files(destination: Path, *, run_log: RunLog | None) -> None:

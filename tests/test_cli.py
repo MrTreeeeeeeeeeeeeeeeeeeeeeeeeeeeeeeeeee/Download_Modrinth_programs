@@ -10,8 +10,6 @@ from modrinth_collection_downloader.cli import (
     _get_channels,
     _resolve_runtime_options,
     build_parser,
-    filter_server_required_projects,
-    is_server_required_project,
     loader_filter_for_project_type,
     modpack_folder_name,
     modpack_zip_filename,
@@ -22,7 +20,6 @@ from modrinth_collection_downloader.cli import (
 )
 from modrinth_collection_downloader.download import DestinationPlan
 from modrinth_collection_downloader.download import DownloadOutcome
-from modrinth_collection_downloader.modpack_convert import SERVER_REQUIRED_MARKER
 
 
 def test_parse_csv_trims_and_skips_empty_values():
@@ -82,7 +79,7 @@ def test_parser_rejects_old_startup_option_flags():
 def test_runtime_options_prompt_for_flags_during_interactive_run(monkeypatch, tmp_path):
     console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
     prompts = []
-    answers = iter([True, True, False, True])
+    answers = iter([True, False, True])
 
     def fake_confirm(prompt, *, default=False):
         prompts.append((prompt, default))
@@ -98,24 +95,22 @@ def test_runtime_options_prompt_for_flags_during_interactive_run(monkeypatch, tm
     console.file.close()
 
     assert options == RuntimeOptions(
-        server_required=True,
         type_subfolders=False,
         modpack_zip=True,
         strict_metadata=False,
         dry_run=True,
     )
     assert prompts == [
-        ("Only download server-required mods and modpacks?", False),
         ("Convert modpack .mrpack files into full .zip archives?", False),
         ("Organize downloads into project-type folders?", True),
         ("Show the download plan only?", False),
     ]
 
 
-def test_runtime_options_offer_server_required_mode_for_modpacks(monkeypatch, tmp_path):
+def test_runtime_options_offer_modpack_zip_mode_for_modpacks(monkeypatch, tmp_path):
     console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
     prompts = []
-    answers = iter([True, False, True, True])
+    answers = iter([False, True, True])
 
     def fake_confirm(prompt, *, default=False):
         prompts.append((prompt, default))
@@ -131,14 +126,12 @@ def test_runtime_options_offer_server_required_mode_for_modpacks(monkeypatch, tm
     console.file.close()
 
     assert options == RuntimeOptions(
-        server_required=True,
         type_subfolders=True,
         modpack_zip=False,
         strict_metadata=False,
         dry_run=True,
     )
     assert prompts == [
-        ("Only download server-required mods and modpacks?", False),
         ("Convert modpack .mrpack files into full .zip archives?", False),
         ("Organize downloads into project-type folders?", True),
         ("Show the download plan only?", False),
@@ -159,7 +152,6 @@ def test_runtime_options_use_saved_defaults_for_prompts(monkeypatch, tmp_path):
         console,
         yes=False,
         saved_options={
-            "server_required": True,
             "type_subfolders": False,
             "modpack_zip": True,
             "strict_metadata": True,
@@ -169,14 +161,12 @@ def test_runtime_options_use_saved_defaults_for_prompts(monkeypatch, tmp_path):
     console.file.close()
 
     assert options == RuntimeOptions(
-        server_required=True,
         type_subfolders=False,
         modpack_zip=True,
         strict_metadata=True,
         dry_run=False,
     )
     assert prompts == [
-        ("Only download server-required mods and modpacks?", True),
         ("Convert modpack .mrpack files into full .zip archives?", True),
         ("Organize downloads into project-type folders?", False),
         ("Show the download plan only?", False),
@@ -200,7 +190,6 @@ def test_runtime_options_use_defaults_for_yes_runs(monkeypatch, tmp_path):
     console.file.close()
 
     assert options == RuntimeOptions(
-        server_required=False,
         type_subfolders=True,
         modpack_zip=False,
         strict_metadata=False,
@@ -221,7 +210,6 @@ def test_runtime_options_use_saved_defaults_for_yes_runs(monkeypatch, tmp_path):
         console,
         yes=True,
         saved_options={
-            "server_required": True,
             "type_subfolders": False,
             "modpack_zip": True,
             "strict_metadata": True,
@@ -231,7 +219,6 @@ def test_runtime_options_use_saved_defaults_for_yes_runs(monkeypatch, tmp_path):
     console.file.close()
 
     assert options == RuntimeOptions(
-        server_required=True,
         type_subfolders=False,
         modpack_zip=True,
         strict_metadata=True,
@@ -253,74 +240,13 @@ def test_runtime_options_saved_defaults_include_first_download_options(monkeypat
         console,
         yes=False,
         saved_options={
-            "server_required": True,
             "modpack_zip": True,
         },
     )
     console.file.close()
 
-    assert options.server_required is True
     assert options.modpack_zip is True
-    assert prompts[:2] == [
-        ("Only download server-required mods and modpacks?", True),
-        ("Convert modpack .mrpack files into full .zip archives?", True),
-    ]
-
-
-def test_server_required_project_filter_keeps_only_required_server_mods_and_modpacks():
-    server_only = {
-        "id": "server-only",
-        "project_type": "mod",
-        "client_side": "unsupported",
-        "server_side": "required",
-    }
-    client_and_server = {
-        "id": "client-and-server",
-        "project_type": "mod",
-        "client_side": "required",
-        "server_side": "required",
-    }
-    required_modpack = {
-        "id": "required-modpack",
-        "project_type": "modpack",
-        "client_side": "required",
-        "server_side": "required",
-    }
-    client_only_modpack = {
-        "id": "client-only-modpack",
-        "project_type": "modpack",
-        "client_side": "required",
-        "server_side": "unsupported",
-    }
-    client_only = {
-        "id": "client-only",
-        "project_type": "mod",
-        "client_side": "required",
-        "server_side": "unsupported",
-    }
-    optional_server = {
-        "id": "optional-server",
-        "project_type": "mod",
-        "client_side": "required",
-        "server_side": "optional",
-    }
-    plugin = {
-        "id": "plugin",
-        "project_type": "plugin",
-        "client_side": "unsupported",
-        "server_side": "required",
-    }
-
-    assert is_server_required_project(server_only) is True
-    assert is_server_required_project(client_and_server) is True
-    assert is_server_required_project(required_modpack) is True
-    assert is_server_required_project(client_only) is False
-    assert is_server_required_project(client_only_modpack) is False
-    assert is_server_required_project(optional_server) is False
-    assert is_server_required_project(plugin) is False
-    assert filter_server_required_projects(
-        [server_only, client_and_server, required_modpack, client_only, client_only_modpack, optional_server, plugin]
-    ) == [server_only, client_and_server, required_modpack]
+    assert prompts[:1] == [("Convert modpack .mrpack files into full .zip archives?", True)]
 
 
 def test_default_channels_include_beta_for_noninteractive_runs(tmp_path):
@@ -477,7 +403,6 @@ def test_modpack_zip_helpers_use_safe_names():
 
     assert modpack_folder_name(project) == "Bad_ Pack"
     assert modpack_zip_filename(file, project, version) == "Bad Pack 1.0.zip"
-    assert modpack_zip_filename(file, project, version, server_required=True) == "Bad Pack 1.0-server.zip"
 
 
 def test_build_download_plan_converts_modpack_destination_to_pack_folder(tmp_path):
@@ -516,7 +441,6 @@ def test_build_download_plan_converts_modpack_destination_to_pack_folder(tmp_pat
         channels=["release"],
         group_by_type=False,
         modpack_zip=True,
-        server_required=True,
         console=console,
     )
     console.file.close()
@@ -524,8 +448,7 @@ def test_build_download_plan_converts_modpack_destination_to_pack_folder(tmp_pat
     assert already_existing == []
     assert skipped == []
     assert planned[0].convert_modpack_zip is True
-    assert planned[0].server_required_only is True
-    assert planned[0].destination.path == tmp_path / "modpack" / "Modpack Name" / "Modpack File-server.zip"
+    assert planned[0].destination.path == tmp_path / "modpack" / "Modpack Name" / "Modpack File.zip"
 
 
 def test_build_download_plan_skips_existing_valid_converted_zip(tmp_path):
@@ -570,163 +493,6 @@ def test_build_download_plan_skips_existing_valid_converted_zip(tmp_path):
         channels=["release"],
         group_by_type=True,
         modpack_zip=True,
-        console=console,
-    )
-    console.file.close()
-
-    assert planned == []
-    assert skipped == []
-    assert already_existing[0].destination.path == destination
-
-
-def test_server_required_converted_modpack_does_not_reuse_full_zip(tmp_path):
-    class FakeClient:
-        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
-            return [
-                {
-                    "id": "version-id",
-                    "status": "listed",
-                    "version_type": "release",
-                    "date_published": "2026-01-01T00:00:00Z",
-                    "game_versions": ["1.20.1"],
-                    "loaders": ["fabric"],
-                    "version_number": "1.0.0",
-                    "files": [
-                        {
-                            "filename": "Pack.mrpack",
-                            "url": "https://example.test/pack.mrpack",
-                            "hashes": {},
-                            "primary": True,
-                            "size": 1,
-                            "file_type": None,
-                        }
-                    ],
-                }
-            ]
-
-    full_destination = tmp_path / "modpack" / "Pack Title" / "Pack.zip"
-    full_destination.parent.mkdir(parents=True)
-    import zipfile
-
-    with zipfile.ZipFile(full_destination, "w") as archive:
-        archive.writestr("mods/client-only.jar", b"mod")
-
-    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
-    planned, already_existing, skipped = _build_download_plan(
-        client=FakeClient(),
-        projects=[{"id": "modpack-id", "slug": "pack-title", "title": "Pack Title", "project_type": "modpack"}],
-        output_dir=tmp_path,
-        minecraft_versions=["1.20.1"],
-        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
-        channels=["release"],
-        group_by_type=True,
-        modpack_zip=True,
-        server_required=True,
-        console=console,
-    )
-    console.file.close()
-
-    assert already_existing == []
-    assert skipped == []
-    assert planned[0].destination.path == tmp_path / "modpack" / "Pack Title" / "Pack-server.zip"
-
-
-def test_server_required_converted_modpack_replaces_unmarked_existing_server_zip(tmp_path):
-    class FakeClient:
-        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
-            return [
-                {
-                    "id": "version-id",
-                    "status": "listed",
-                    "version_type": "release",
-                    "date_published": "2026-01-01T00:00:00Z",
-                    "game_versions": ["1.20.1"],
-                    "loaders": ["fabric"],
-                    "version_number": "1.0.0",
-                    "files": [
-                        {
-                            "filename": "Pack.mrpack",
-                            "url": "https://example.test/pack.mrpack",
-                            "hashes": {},
-                            "primary": True,
-                            "size": 1,
-                            "file_type": None,
-                        }
-                    ],
-                }
-            ]
-
-    destination = tmp_path / "modpack" / "Pack Title" / "Pack-server.zip"
-    destination.parent.mkdir(parents=True)
-    import zipfile
-
-    with zipfile.ZipFile(destination, "w") as archive:
-        archive.writestr("mods/client-only.jar", b"mod")
-
-    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
-    planned, already_existing, skipped = _build_download_plan(
-        client=FakeClient(),
-        projects=[{"id": "modpack-id", "slug": "pack-title", "title": "Pack Title", "project_type": "modpack"}],
-        output_dir=tmp_path,
-        minecraft_versions=["1.20.1"],
-        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
-        channels=["release"],
-        group_by_type=True,
-        modpack_zip=True,
-        server_required=True,
-        console=console,
-    )
-    console.file.close()
-
-    assert already_existing == []
-    assert skipped == []
-    assert planned[0].destination.path == destination
-    assert planned[0].destination.status == "replace"
-
-
-def test_server_required_converted_modpack_reuses_marked_existing_server_zip(tmp_path):
-    class FakeClient:
-        def list_project_versions(self, project_id, *, minecraft_versions=None, loaders=None):
-            return [
-                {
-                    "id": "version-id",
-                    "status": "listed",
-                    "version_type": "release",
-                    "date_published": "2026-01-01T00:00:00Z",
-                    "game_versions": ["1.20.1"],
-                    "loaders": ["fabric"],
-                    "version_number": "1.0.0",
-                    "files": [
-                        {
-                            "filename": "Pack.mrpack",
-                            "url": "https://example.test/pack.mrpack",
-                            "hashes": {},
-                            "primary": True,
-                            "size": 1,
-                            "file_type": None,
-                        }
-                    ],
-                }
-            ]
-
-    destination = tmp_path / "modpack" / "Pack Title" / "Pack-server.zip"
-    destination.parent.mkdir(parents=True)
-    import zipfile
-
-    with zipfile.ZipFile(destination, "w") as archive:
-        archive.writestr(SERVER_REQUIRED_MARKER, "server filtered")
-
-    console = Console(file=open(tmp_path / "console.txt", "w", encoding="utf-8"), force_terminal=False)
-    planned, already_existing, skipped = _build_download_plan(
-        client=FakeClient(),
-        projects=[{"id": "modpack-id", "slug": "pack-title", "title": "Pack Title", "project_type": "modpack"}],
-        output_dir=tmp_path,
-        minecraft_versions=["1.20.1"],
-        loader_filters={"mod": ["fabric"], "shader": [], "plugin": []},
-        channels=["release"],
-        group_by_type=True,
-        modpack_zip=True,
-        server_required=True,
         console=console,
     )
     console.file.close()
@@ -808,47 +574,3 @@ def test_download_planned_converts_modpacks(monkeypatch, tmp_path):
     assert "Converting 1/1: Pack -> pack.zip" in text
     assert "Downloaded 1/1 with warning: Pack -> pack.zip" in text
 
-
-def test_download_planned_passes_server_required_mode_to_modpack_converter(monkeypatch, tmp_path):
-    output_file = tmp_path / "console.txt"
-    console = Console(file=output_file.open("w", encoding="utf-8"), width=160, force_terminal=False)
-    planned = [
-        PlannedDownload(
-            {"title": "Pack"},
-            {"version_number": "1.0.0"},
-            {"filename": "pack.mrpack", "url": "https://example.test/pack.mrpack", "hashes": {}, "size": 1},
-            DestinationPlan(tmp_path / "modpack" / "Pack" / "pack.zip", "new"),
-            convert_modpack_zip=True,
-            server_required_only=True,
-        )
-    ]
-    convert_kwargs = []
-
-    def fake_download(url, destination, **kwargs):
-        destination.write_bytes(b"mrpack")
-        return DownloadOutcome()
-
-    def fake_convert(source, destination, **kwargs):
-        convert_kwargs.append(kwargs)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"zip")
-
-        class Result:
-            warning = ""
-            missing_files = []
-
-        return Result()
-
-    monkeypatch.setattr(cli_module, "download_file", fake_download)
-    monkeypatch.setattr(cli_module, "convert_mrpack_to_zip", fake_convert)
-
-    class FakeClient:
-        def get_projects(self, ids):
-            return [{"id": project_id, "server_side": "required"} for project_id in ids]
-
-    failures = _download_planned(console, planned, modrinth_client=FakeClient())
-    console.file.close()
-
-    assert failures == []
-    assert convert_kwargs[0]["server_required_only"] is True
-    assert convert_kwargs[0]["project_metadata_resolver"](["abc"]) == [{"id": "abc", "server_side": "required"}]
