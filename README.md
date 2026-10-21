@@ -1,153 +1,51 @@
 # Modrinth Collection Downloader
 
-A command-line app for downloading selected project types from a Modrinth collection.
+Download projects from a Modrinth collection using a desktop window.
 
-## Install
+## Open the app
 
-From this folder:
+**Double-click `Start Downloader.vbs`.** Keep it in this folder with the other files.
+You can also open `Downloader.pyw` directly if Python file associations are configured.
 
-```powershell
-python -m pip install -e .
-```
+Python 3.10 or newer with Tkinter is required (included with the normal Windows
+installer from python.org). On this computer Python is already installed.
+The launcher automatically installs missing `requests` and `rich` packages on the
+first run, with a setup window. Internet access is required for setup and downloads.
+No terminal commands or command-line arguments are needed.
 
-Installing does not start the downloader. To run it after installing:
+## Use the window
 
-```powershell
-python -m modrinth_collection_downloader
-```
+1. Paste a Modrinth collection URL or ID.
+2. Choose the download folder using **Browse**.
+3. Select project types and release channels. Optionally enter Minecraft versions
+   and loaders. Leave a filter blank for any; separate multiple values with commas.
+4. Click **Preview** to check matching files and skipped projects, or **Download**
+   to save the files. The activity area shows results and errors.
+5. Use **Open download folder** to view the files.
 
-## Basic Usage
+Settings are remembered between runs. Existing matching files are skipped;
+conflicting filenames are renamed. Downloads run in the background so the window
+stays responsive. Wait until the run finishes before closing the app.
 
-Interactive mode:
+Options include type subfolders, conversion of modpacks into ZIP files, and strict
+file verification. Converted modpacks include their downloaded contents and are
+placed in individual folders under `modpack`.
 
-```powershell
-python -m modrinth_collection_downloader
-```
+Public collections normally need no token. For a private collection, enter a
+Modrinth token in the masked token field. A token is saved only when **Remember
+token** is checked; saved tokens are plain text in the local configuration file.
+Uncheck it and run Preview or Download to remove a previously saved token.
+A blank field also allows the `MODRINTH_TOKEN` environment variable. Select
+**Ignore all tokens for this run** to disable authentication.
 
-The program asks for the collection, item types, version filters, download folder, and run options while it is running. You can choose type subfolders versus flat output, modpack ZIP conversion, dry run, and strict verification from the prompts instead of adding startup flags.
+Configuration is stored in `~/.modrinth_collection_downloader/config.json`.
+Each run writes a log; previews store logs beside the configuration without
+creating the download folder. Download logs are stored in the output folder.
 
-Direct collection URL:
+## Development
 
-```powershell
-python -m modrinth_collection_downloader "https://modrinth.com/collection/gRlE8phg/mods"
-```
+`python -m modrinth_collection_downloader` opens the GUI. The original terminal
+interface remains available through `python -m modrinth_collection_downloader.cli`
+or the `modrinth-collection-downloader` installed command.
 
-Repeat the last saved run without prompts:
-
-```powershell
-python -m modrinth_collection_downloader --yes
-```
-
-Repeat the last saved options with a different collection:
-
-```powershell
-python -m modrinth_collection_downloader gRlE8phg --yes
-```
-
-The app fetches the collection before asking filter questions, then shows the item types and counts in the collection. Loader and option prompts are only shown when they apply to the selected item types:
-
-- Mods and modpacks use the mod loader prompt.
-- Shaders use a separate shader loader prompt.
-- Plugins use a separate plugin platform prompt.
-- Resource packs and datapacks are never filtered by loader, even when a mod loader is specified.
-- Modpack ZIP conversion is offered when modpacks are selected.
-
-Interactive runs also ask which release channels to include. The default is `release,beta` because some common collection items, including resource packs, publish compatible versions as beta. Enter `all` to include `release,beta,alpha`. Enter `release` when you want release-only downloads.
-
-Minecraft version matching handles versions that list several compatible game versions, and also treats minor-series entries like `1.20` or `1.20.x` as compatible with patch versions such as `1.20.1`.
-
-By default, every downloaded file is placed in a subfolder named for its Modrinth project type:
-
-```text
-output-folder/
-  mod/
-  modpack/
-  resourcepack/
-  shader/
-  plugin/
-  datapack/
-```
-
-Choose flat output during an interactive run to put all downloaded files directly in the output folder.
-
-Choose modpack ZIP conversion during an interactive run to convert Modrinth modpack `.mrpack` files into full `.zip` archives. A converted modpack is always written to its own folder under `modpack`, even when flat output is selected:
-
-```text
-output-folder/
-  modpack/
-    Pack Name/
-      Pack Name Version.zip
-```
-
-The converter reads `modrinth.index.json` from the `.mrpack`, copies `overrides/` and `client-overrides/`, downloads the referenced files into their manifest paths, and writes the final zip. If some referenced files cannot be downloaded, the zip is still created with `FAILED_DOWNLOADS.txt` inside it, and the console plus run log show a warning.
-
-Every run writes a plain-text log file when it finishes. By default, the log is saved in the selected download folder using a timestamped filename like:
-
-```text
-modrinth_collection_downloader_20260604_123000.log
-```
-
-For token-only actions or early exits before a download folder is known, the log is written beside the app config file. During an interactive run, you can choose a custom log file or log folder, or leave it blank for the default behavior.
-
-The log records collection details, selected filters, token source with the token masked, each planned/skipped/downloaded item, failures, and the final summary.
-
-During actual downloads, the terminal prints a permanent `Downloading x/y` and `Downloaded x/y` line for each file. This keeps large collections visible in normal PowerShell scrollback even though only the current file uses a live progress bar.
-
-Downloads are retried when verification fails. If Modrinth's recorded size or hashes disagree with the CDN response, the app accepts the file only when the CDN transfer completed and the downloaded `.zip`, `.jar`, or `.mrpack` passes archive validation. The run log records this as a warning. Choose strict verification during an interactive run to fail instead.
-
-## Saved Choices
-
-The app saves the collection, start/token prompt choices, download folder, selected item types, version filters, loader filters, channel selection, log-file choice, and download options after each run setup. The next interactive run uses those saved values as prompt defaults, and `--yes` uses the saved values without prompting.
-
-## Personal Access Tokens
-
-Most public downloads do not need a token. Private or otherwise restricted collections may require a Modrinth Personal Access Token.
-
-Save a token:
-
-```powershell
-python -m modrinth_collection_downloader
-```
-
-Then choose `Save or replace Modrinth token`.
-
-Use a token for one download, save a token for downloads, or continue without a token:
-
-```powershell
-python -m modrinth_collection_downloader
-```
-
-Then choose `Download a collection` and select the token option you want.
-
-Forget the saved token:
-
-```powershell
-python -m modrinth_collection_downloader
-```
-
-Then choose `Forget saved Modrinth token`.
-
-The saved token is stored in plain text at:
-
-```text
-~/.modrinth_collection_downloader/config.json
-```
-
-The app masks tokens in terminal output, but the config file itself contains the full token.
-
-## Options
-
-Startup options are intentionally limited:
-
-- `collection`: optional Modrinth collection URL or ID. If omitted, the program prompts and defaults to the last saved collection.
-- `--yes`: use saved/default choices and avoid prompts.
-
-All other choices are made inside the program and saved for the next run.
-
-Token precedence is:
-
-1. token entered for this run
-2. `MODRINTH_TOKEN`
-3. saved config token
-
-Choosing `Continue without a token` disables all token sources for that run.
+Run the checks with `python -m pytest -q`.

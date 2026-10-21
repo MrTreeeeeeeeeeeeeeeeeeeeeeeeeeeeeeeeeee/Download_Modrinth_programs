@@ -1247,3 +1247,7 @@ def _print_summary(
         for item, reason in failures:
             failed.add_row(item.project.get("title") or item.project.get("id"), reason)
         console.print(failed)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
