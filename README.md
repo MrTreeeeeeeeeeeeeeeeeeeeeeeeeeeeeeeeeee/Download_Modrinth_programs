@@ -49,3 +49,23 @@ interface remains available through `python -m modrinth_collection_downloader.cl
 or the `modrinth-collection-downloader` installed command.
 
 Run the checks with `python -m pytest -q`.
+
+## Convert a modpack to ZIP
+
+- **Local file:** click **Choose .mrpack…**, select a file, choose your output
+  folder, and click **Download**. The ZIP contains the pack's referenced downloads
+  and client overrides. Local file conversion uses the versions in the pack;
+  project-type, Minecraft-version, loader, and channel filters do not apply.
+- **Modrinth link:** paste a `https://modrinth.com/modpack/...` link in the source
+  field and click **Download**. Main-page links select the latest matching version
+  using your Minecraft, mod/modpack loader, and release-channel filters. A specific
+  `/version/...` link uses that exact version instead. ZIP conversion is automatic
+  for standalone modpack links, regardless of the collection conversion checkbox.
+- **Preview** checks the source and shows the destination without downloading.
+  Local files create ZIPs directly in the selected folder; linked modpacks use
+  `modpack/<pack name>/`. Existing local ZIPs are preserved with a renamed output.
+
+Internet access is needed to fetch files referenced by a `.mrpack`. If some files
+cannot be downloaded, the activity log reports a warning and the ZIP contains
+`FAILED_DOWNLOADS.txt` with the missing files. These ZIPs contain client pack files,
+not a Minecraft launcher or a Minecraft installation.

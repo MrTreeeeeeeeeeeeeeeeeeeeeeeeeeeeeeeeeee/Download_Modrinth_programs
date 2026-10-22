@@ -14,6 +14,7 @@ from .auth import resolve_token
 from .config import load_config, save_config, DEFAULT_DOWNLOAD_OPTIONS, get_config_path
 from .modrinth import ModrinthClient, parse_collection_id
 from .run_log import RunLog, resolve_log_path
+from .sources import source_kind, convert_local, plan_modpack_link
 
 TYPES = ('mod', 'modpack', 'resourcepack', 'datapack', 'shader', 'plugin')
 
@@ -48,7 +49,7 @@ class DownloaderApp:
         outer.pack(fill='both', expand=True)
         outer.columnconfigure(1, weight=1)
         ttk.Label(outer, text='Modrinth Collection Downloader', font=('Segoe UI', 19, 'bold')).grid(row=0, column=0, columnspan=3, sticky='w')
-        ttk.Label(outer, text='Paste a collection, choose your filters, then preview or download.').grid(row=1, column=0, columnspan=3, sticky='w', pady=(0, 12))
+        ttk.Label(outer, text='Paste a collection or Modrinth modpack link, or choose a .mrpack file.').grid(row=1, column=0, columnspan=3, sticky='w', pady=(0, 12))
         self.fields = {}
         saved = self.config.last_download_inputs
         defaults = {
@@ -60,10 +61,11 @@ class DownloaderApp:
             'Plugin loaders': saved.get('plugin_loaders', ''),
         }
         for row, (label, default) in enumerate(defaults.items(), 2):
-            ttk.Label(outer, text=label).grid(row=row, column=0, sticky='w', padx=(0, 12))
+            ttk.Label(outer, text='Collection / modpack / file' if row == 2 else label).grid(row=row, column=0, sticky='w', padx=(0, 12))
             variable = tk.StringVar(value=default)
             self.fields[label] = variable
-            ttk.Entry(outer, textvariable=variable).grid(row=row, column=1, columnspan=1 if row == 3 else 2, sticky='ew', pady=3)
+            ttk.Entry(outer, textvariable=variable).grid(row=row, column=1, columnspan=1 if row in (2, 3) else 2, sticky='ew', pady=3)
+        ttk.Button(outer, text='Choose .mrpack…', command=self.browse_mrpack).grid(row=2, column=2, padx=(8, 0))
         ttk.Button(outer, text='Browse…', command=self.browse).grid(row=3, column=2, padx=(8, 0))
         ttk.Label(outer, text='Leave filters blank for any. Separate values with commas (for example: 1.21, 1.20.1 or fabric, forge).').grid(row=8, column=0, columnspan=3, sticky='w')
         types_frame = ttk.LabelFrame(outer, text='Project types', padding=8)
@@ -83,7 +85,7 @@ class DownloaderApp:
         for key, label in [('type_subfolders', 'Use type subfolders'), ('modpack_zip', 'Convert modpacks to ZIP'), ('strict_metadata', 'Strict file verification')]:
             self.options[key] = tk.BooleanVar(value=self.config.last_download_options.get(key, DEFAULT_DOWNLOAD_OPTIONS[key]))
             ttk.Checkbutton(options, text=label, variable=self.options[key]).pack(side='left')
-        token_frame = ttk.LabelFrame(outer, text='Private collections (optional)', padding=8)
+        token_frame = ttk.LabelFrame(outer, text='Authentication (optional)', padding=8)
         token_frame.grid(row=11, column=0, columnspan=3, sticky='ew', pady=10)
         token_frame.columnconfigure(1, weight=1)
         ttk.Label(token_frame, text='Modrinth token').grid(row=0, column=0, padx=(0, 10))
@@ -111,6 +113,11 @@ class DownloaderApp:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(80, self.poll)
 
+    def browse_mrpack(self):
+        path = filedialog.askopenfilename(title='Choose a Modrinth modpack', filetypes=[('Modrinth modpacks', '*.mrpack')])
+        if path:
+            self.fields['Collection URL or ID'].set(path)
+
     def browse(self):
         folder = filedialog.askdirectory(initialdir=self.fields['Download folder'].get())
         if folder:
@@ -134,12 +141,16 @@ class DownloaderApp:
             return
         values = {key: value.get().strip() for key, value in self.fields.items()}
         try:
-            parse_collection_id(values['Collection URL or ID'])
+            kind = source_kind(values['Collection URL or ID'])
+            if kind == 'collection':
+                parse_collection_id(values['Collection URL or ID'])
+            elif kind == 'file' and not Path(values['Collection URL or ID']).expanduser().is_file():
+                raise ValueError('Choose an existing .mrpack file.')
             if not values['Download folder']:
                 raise ValueError('Choose a download folder.')
             types = {key for key, value in self.types.items() if value.get()}
             channels = [key for key, value in self.channels.items() if value.get()]
-            if not types or not channels:
+            if kind != 'file' and (not channels or (kind == 'collection' and not types)):
                 raise ValueError('Select at least one project type and release channel.')
         except ValueError as exc:
             messagebox.showerror('Check your settings', str(exc))
@@ -153,7 +164,7 @@ class DownloaderApp:
         self.log.configure(state='normal')
         self.log.delete('1.0', 'end')
         self.log.configure(state='disabled')
-        self.status.set('Previewing collection…' if preview else 'Downloading collection…')
+        self.status.set('Preparing preview…' if preview else 'Downloading / converting…')
         self.progress.start(12)
         threading.Thread(target=self.run, args=(settings,), daemon=True).start()
 
@@ -166,7 +177,10 @@ class DownloaderApp:
         try:
             values = settings['values']
             config = self.config
-            config.last_collection = values['Collection URL or ID']
+            source = values['Collection URL or ID']
+            kind = source_kind(source)
+            if kind == 'collection':
+                config.last_collection = source
             config.last_download_dir = str(output)
             config.modrinth_token = settings['token'].strip() if settings['remember'] else None
             inputs = dict(types=','.join(sorted(settings['types'])), channels=','.join(settings['channels']))
@@ -177,18 +191,29 @@ class DownloaderApp:
             save_config(config)
             token = resolve_token(cli_token=settings['token'], no_token=settings['no_token']).token
             client = ModrinthClient(token=token)
-            collection = client.get_collection(parse_collection_id(config.last_collection))
-            console.print('Collection: ' + str(collection.get('name', config.last_collection)), markup=False)
-            ids = list(collection.get('projects') or [])
-            projects = cli._order_projects(ids, client.get_projects(ids)) if ids else []
-            projects = [project for project in projects if project.get('project_type') in settings['types']]
-            console.print(f'{len(projects)} projects match your selected types.')
-            planned, existing, skipped = cli._build_download_plan(
-                client=client, projects=projects, output_dir=output,
-                minecraft_versions=cli.parse_csv(inputs['minecraft_version']),
-                loader_filters={kind: cli.parse_csv(inputs[key]) for kind, key in [('mod', 'mod_loaders'), ('shader', 'shader_loaders'), ('plugin', 'plugin_loaders')]},
-                channels=settings['channels'], group_by_type=settings['options']['type_subfolders'],
-                modpack_zip=settings['options']['modpack_zip'], console=console, run_log=log)
+            if kind == 'file':
+                summary = convert_local(source, output, preview=settings['preview'],
+                    strict_metadata=settings['options']['strict_metadata'], console=console, run_log=log)
+                log.add('Summary', result=summary)
+                return
+            if kind == 'modpack':
+                planned, existing, skipped = plan_modpack_link(source, client, output=output,
+                    minecraft_versions=cli.parse_csv(inputs['minecraft_version']),
+                    loaders=cli.parse_csv(inputs['mod_loaders']), channels=settings['channels'],
+                    console=console, run_log=log)
+            else:
+                collection = client.get_collection(parse_collection_id(config.last_collection))
+                console.print('Collection: ' + str(collection.get('name', config.last_collection)), markup=False)
+                ids = list(collection.get('projects') or [])
+                projects = cli._order_projects(ids, client.get_projects(ids)) if ids else []
+                projects = [project for project in projects if project.get('project_type') in settings['types']]
+                console.print(f'{len(projects)} projects match your selected types.')
+                planned, existing, skipped = cli._build_download_plan(
+                    client=client, projects=projects, output_dir=output,
+                    minecraft_versions=cli.parse_csv(inputs['minecraft_version']),
+                    loader_filters={kind: cli.parse_csv(inputs[key]) for kind, key in [('mod', 'mod_loaders'), ('shader', 'shader_loaders'), ('plugin', 'plugin_loaders')]},
+                    channels=settings['channels'], group_by_type=settings['options']['type_subfolders'],
+                    modpack_zip=settings['options']['modpack_zip'], console=console, run_log=log)
             cli._print_plan(console, planned, existing, skipped, dry_run=settings['preview'])
             failures = []
             if not settings['preview']:
